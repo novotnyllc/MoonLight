@@ -311,17 +311,31 @@ Module::Module(const char* moduleName, PsychicHttpServer* server, ESP32SvelteKit
 }
 
 void Module::loop20ms() {
+  Char<32> originId;
+  bool sendSnapshot = false;
+  portENTER_CRITICAL(&snapshotMux);
   if (requestUIUpdate) {
     requestUIUpdate = false;  // reset the flag
-    EXT_LOGD(MB_TAG, "requestUIUpdate %s", _moduleName);
-
-    // update state to UI
-    update(
-        [&](ModuleState& state) {
-          return StateUpdateResult::CHANGED;  // notify StatefulService by returning CHANGED
-        },
-        _moduleName);
+    originId = snapshotOrigin;
+    snapshotOrigin = "";
+    sendSnapshot = true;
   }
+  portEXIT_CRITICAL(&snapshotMux);
+
+  if (!sendSnapshot) return;
+  EXT_LOGD(MB_TAG, "requestUIUpdate %s", _moduleName);
+  for (const StateUpdateCallback& callback : snapshotHandlers) callback(originId.c_str());
+}
+
+void Module::queueSnapshot(const String& originId) {
+  portENTER_CRITICAL(&snapshotMux);
+  snapshotOrigin = originId;
+  requestUIUpdate = true;
+  portEXIT_CRITICAL(&snapshotMux);
+}
+
+void Module::addSnapshotHandler(StateUpdateCallback callback) {
+  if (callback) snapshotHandlers.push_back(callback);
 }
 
 void Module::processUpdatedItem(const UpdatedItem& updatedItem) {

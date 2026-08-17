@@ -87,7 +87,7 @@ class FastLEDDriver : public DriverNode {
       if (engine != this->engine.c_str()) {
         EXT_LOGD(ML_TAG, "Resolved engine %s %s → %s", ch.name().c_str(), this->engine.c_str(), engine.c_str());
         updateControl("engine", engine.c_str());
-        moduleNodes->requestUIUpdate = true;
+        moduleNodes->queueSnapshot(name());
       }
     });
   }
@@ -343,7 +343,7 @@ class FastLEDDriver : public DriverNode {
       version.format("4.0 pre release! %s", FASTLED_BUILD);  // version.format("%s %s", TOSTRING(FASTLED_VERSION), FASTLED_BUILD);
       updateControl("version", version);
       updateControl("status", statusString.c_str());
-      moduleNodes->requestUIUpdate = true;
+      moduleNodes->queueSnapshot(name());
 
       fl::ChipsetTimingConfig timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
       CRGB* leds = (CRGB*)layerP.lights.channelsD;

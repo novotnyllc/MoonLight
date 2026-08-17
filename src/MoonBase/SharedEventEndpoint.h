@@ -36,8 +36,8 @@ class SharedEventEndpoint {
     // ADDED: Register handler for new subscriptions (send state when client subscribes)
     _socket->onSubscribe(eventName, [this, module](const String& originId) { syncState(module, originId, true); });
 
-    // Register this module for state updates (server -> clients)
-    module->addUpdateHandler([this, module](const String& originId) { syncState(module, originId, false); }, false);
+    module->addUpdateHandler([module](const String& originId) { module->queueSnapshot(originId); }, false);
+    module->addSnapshotHandler([this, module](const String& originId) { syncState(module, originId, false); });
   }
 
   void begin() {

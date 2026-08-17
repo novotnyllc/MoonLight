@@ -90,6 +90,12 @@ class Module : public StatefulService<ModuleState> {
   /// Set to true to push current state to UI on next loop20ms() cycle.
   bool requestUIUpdate = false;
 
+  /// Queue a latest-wins outbound state snapshot for the next loop tick.
+  void queueSnapshot(const String& originId);
+
+  /// Register an outbound snapshot transport. Mutations use ordinary update handlers.
+  void addSnapshotHandler(StateUpdateCallback callback);
+
   Module(const char* moduleName, PsychicHttpServer* server, ESP32SvelteKit* sveltekit);
 
   /// Registers HTTP/WS endpoints and initializes state from definition or persisted file.
@@ -146,6 +152,11 @@ class Module : public StatefulService<ModuleState> {
   /// HTTP server for registering REST endpoints. Protected so subclasses (e.g. NodeManager) can register additional routes.
   PsychicHttpServer* _server;
   ESP32SvelteKit* _sveltekit;
+
+ private:
+  Char<32> snapshotOrigin;
+  std::vector<StateUpdateCallback> snapshotHandlers;
+  portMUX_TYPE snapshotMux = portMUX_INITIALIZER_UNLOCKED;
 };
 
 #endif

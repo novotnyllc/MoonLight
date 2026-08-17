@@ -208,7 +208,7 @@ void NodeManager::handleNodeNameChange(const UpdatedItem& updatedItem, JsonVaria
   }
 
   if (newNode) {
-    requestUIUpdate = true;
+    queueSnapshot(_moduleName);
   }
 
   #if FT_ENABLED(FT_LIVESCRIPT)

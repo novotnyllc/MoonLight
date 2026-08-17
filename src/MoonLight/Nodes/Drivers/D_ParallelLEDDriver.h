@@ -109,7 +109,7 @@ class ParallelLEDDriver : public DriverNode {
       version = HP_ALL_BUILD;
       updateControl("version", version);
       updateControl("status", statusString.c_str());
-      moduleNodes->requestUIUpdate = true;
+      moduleNodes->queueSnapshot(name());
 
         // ESP32-P4: Uses parlio driver with direct LUT access (no explicit init needed)
         // Non-P4: Uses Yves driver with DMA buffer allocation and initled()

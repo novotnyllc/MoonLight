@@ -32,8 +32,8 @@ class SharedWebSocketServer {
 
   void registerModule(Module* module) {
     EXT_LOGD(MB_TAG, "%s", module->_moduleName);
-    // Register this module for state updates
-    module->addUpdateHandler([this, module](const String& originId) { transmitData((String("/rest/") + module->_moduleName).c_str(), nullptr, originId); }, false);
+    module->addUpdateHandler([module](const String& originId) { module->queueSnapshot(originId); }, false);
+    module->addSnapshotHandler([this, module](const String& originId) { transmitData((String("/rest/") + module->_moduleName).c_str(), nullptr, originId); });
   }
 
   void begin() {
