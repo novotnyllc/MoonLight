@@ -1,6 +1,7 @@
 #include <ConfigRecovery.h>
 #include <RecoveryPolicy.h>
 
+#include <cstdio>
 #include <cstring>
 #include <vector>
 #include <esp_log.h>
@@ -14,7 +15,8 @@ constexpr const char* LAST_ACTION_FILE = "/.config-recovery/last_action";
 constexpr const char* RESTORE_MARKER_FILE = "/.config-recovery/restore_in_progress";
 constexpr const char* SLOT_MANIFEST = "/manifest";
 constexpr const char* SLOT_MANIFEST_TEMP = "/manifest.tmp";
-constexpr const char* SLOT_MANIFEST_CONTENT = "MoonLightConfigRecovery/1";
+constexpr const char* SLOT_MANIFEST_V1 = "MoonLightConfigRecovery/1";
+constexpr const char* SLOT_MANIFEST_V2 = "MoonLightConfigRecovery/2";
 constexpr uint32_t SCAN_INTERVAL_MS = 60000;
 constexpr uint32_t CONFIRMATION_MS = 10 * 60 * 1000;
 
@@ -181,12 +183,6 @@ Fingerprint fingerprintCurrent() {
   return result;
 }
 
-Fingerprint fingerprintConfig(const String& root) {
-  Fingerprint result;
-  fingerprintTree(result, root, "/config");
-  return result;
-}
-
 bool removeTree(const String& path) {
   File root = recoveryFs->open(path);
   if (!root) return true;
@@ -343,7 +339,7 @@ bool readableDirectory(const String& path) {
   return readable;
 }
 
-bool validSlotManifest(const String& root) {
+bool readSlotManifest(const String& root, Fingerprint& expected) {
   File manifest = recoveryFs->open(root + SLOT_MANIFEST, "r");
   if (!manifest || manifest.isDirectory()) {
     manifest.close();
@@ -351,49 +347,87 @@ bool validSlotManifest(const String& root) {
   }
   String content = manifest.readString();
   manifest.close();
-  return content == SLOT_MANIFEST_CONTENT;
+  unsigned long long xorHash = 0;
+  unsigned long long sumHash = 0;
+  unsigned long long fileCount = 0;
+  int consumed = 0;
+  if (sscanf(content.c_str(), "MoonLightConfigRecovery/2\n%llx\n%llx\n%llu%n", &xorHash, &sumHash, &fileCount, &consumed) != 3 ||
+      consumed != static_cast<int>(content.length()) || fileCount > UINT32_MAX) {
+    return false;
+  }
+  expected.xorHash = static_cast<uint64_t>(xorHash);
+  expected.sumHash = static_cast<uint64_t>(sumHash);
+  expected.fileCount = static_cast<uint32_t>(fileCount);
+  expected.valid = true;
+  return true;
 }
 
-bool writeSlotManifest(const String& root) {
+bool writeSlotManifest(const String& root, const Fingerprint& fingerprint) {
+  if (!fingerprint.valid) return false;
+  char content[96];
+  int length = snprintf(
+      content,
+      sizeof(content),
+      "%s\n%016llx\n%016llx\n%lu",
+      SLOT_MANIFEST_V2,
+      static_cast<unsigned long long>(fingerprint.xorHash),
+      static_cast<unsigned long long>(fingerprint.sumHash),
+      static_cast<unsigned long>(fingerprint.fileCount));
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(content)) return false;
   String temporary = root + SLOT_MANIFEST_TEMP;
   recoveryFs->remove(temporary);
   File manifest = recoveryFs->open(temporary, "w");
   if (!manifest) return false;
-  bool written = manifest.print(SLOT_MANIFEST_CONTENT) == strlen(SLOT_MANIFEST_CONTENT);
+  bool written = manifest.write(reinterpret_cast<const uint8_t*>(content), static_cast<size_t>(length)) == static_cast<size_t>(length);
   manifest.close();
   if (!written) return false;
-  return recoveryFs->rename(temporary, root + SLOT_MANIFEST);
+  String destination = root + SLOT_MANIFEST;
+  if (recoveryFs->exists(destination) && !recoveryFs->remove(destination)) return false;
+  return recoveryFs->rename(temporary, destination);
 }
 
-bool validateSlot(int slot, bool upgradeLegacyManifest) {
+bool legacyManifestEligible(const String& root) {
+  File manifest = recoveryFs->open(root + SLOT_MANIFEST, "r");
+  if (!manifest) return !recoveryFs->exists(root + SLOT_MANIFEST);
+  if (manifest.isDirectory()) {
+    manifest.close();
+    return false;
+  }
+  String content = manifest.readString();
+  manifest.close();
+  return content == SLOT_MANIFEST_V1;
+}
+
+bool validateSlot(int slot) {
   String root = slotRoot(slot);
   bool configReadable = readableDirectory(root + "/config");
   bool livescriptsReadable = readableDirectory(root + "/livescripts");
-  bool manifestValid = validSlotManifest(root);
-  bool manifestPresent = recoveryFs->exists(root + SLOT_MANIFEST);
-  if (!manifestPresent && upgradeLegacyManifest && configReadable && !recoveryFs->exists(root + "/livescripts")) {
-    Fingerprint confirmedConfig = fingerprintConfig(root + "/config");
-    Fingerprint liveConfig = fingerprintConfig("/.config");
-    if (confirmedConfig == liveConfig) {
-      livescriptsReadable = copyRootLiveScripts(root + "/livescripts") && readableDirectory(root + "/livescripts");
-    }
-  }
-  if (!manifestPresent && upgradeLegacyManifest && configReadable && livescriptsReadable) {
-    Fingerprint legacy = fingerprintWorkingSet(root);
-    manifestValid = legacy.valid && writeSlotManifest(root) && validSlotManifest(root);
-  }
-  if (!recoverySlotReady(manifestValid, configReadable, livescriptsReadable)) return false;
-  return fingerprintWorkingSet(root).valid;
+  if (!recoverySlotReady(true, configReadable, livescriptsReadable)) return false;
+  Fingerprint actual = fingerprintWorkingSet(root);
+  Fingerprint expected;
+  return actual.valid && readSlotManifest(root, expected) && actual == expected;
 }
 
-int readActiveSlot() {
+int readActiveSlotIndex() {
   File file = recoveryFs->open(ACTIVE_FILE, "r");
   if (!file) return -1;
   int value = file.read();
   file.close();
   if (value != '0' && value != '1') return -1;
-  int slot = value - '0';
-  return validateSlot(slot, true) ? slot : -1;
+  return value - '0';
+}
+
+bool upgradeLegacySlot(int slot, bool failureReset, const Fingerprint& liveFingerprint) {
+  if (slot < 0) return false;
+  String root = slotRoot(slot);
+  bool rootsReadable = readableDirectory(root + "/config") && readableDirectory(root + "/livescripts");
+  if (!legacyManifestEligible(root)) return false;
+  Fingerprint slotFingerprint = rootsReadable ? fingerprintWorkingSet(root) : Fingerprint{};
+  bool slotMatchesLive = slotFingerprint.valid && slotFingerprint == liveFingerprint;
+  if (!recoveryMayUpgradeLegacySlot(failureReset, rootsReadable, liveFingerprint.valid, slotMatchesLive)) return false;
+  if (!writeSlotManifest(root, slotFingerprint) || !validateSlot(slot)) return false;
+  ESP_LOGW(TAG, "Upgraded matching legacy recovery slot %d without adopting live files", slot);
+  return true;
 }
 
 bool writeActiveSlot(int slot) {
@@ -417,7 +451,7 @@ bool markRestoreInProgress() {
 
 bool restoreSlot(int slot) {
   String source = slotRoot(slot);
-  if (!validateSlot(slot, false)) return false;
+  if (!validateSlot(slot)) return false;
   Fingerprint sourceFingerprint = fingerprintWorkingSet(source);
   if (!sourceFingerprint.valid) return false;
   if (!markRestoreInProgress()) return false;
@@ -437,7 +471,7 @@ bool promoteCurrent() {
 
   Fingerprint afterCopy = fingerprintCurrent();
   Fingerprint staged = fingerprintWorkingSet(targetRoot);
-  if (afterCopy != currentFingerprint || staged != afterCopy || !writeSlotManifest(targetRoot) || !validateSlot(target, false) || !writeActiveSlot(target)) return false;
+  if (afterCopy != currentFingerprint || staged != afterCopy || !writeSlotManifest(targetRoot, staged) || !validateSlot(target) || !writeActiveSlot(target)) return false;
 
   activeSlot = target;
   confirmedFingerprint = staged;
@@ -457,10 +491,12 @@ bool isFailureReset(esp_reset_reason_t reason) {
 bool ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
   recoveryFs = fs;
   readLastAction();
-  activeSlot = readActiveSlot();
+  currentFingerprint = fingerprintCurrent();
+  int configuredSlot = readActiveSlotIndex();
+  activeSlot = configuredSlot >= 0 && validateSlot(configuredSlot) ? configuredSlot : -1;
+  if (activeSlot < 0 && upgradeLegacySlot(configuredSlot, isFailureReset(resetReason), currentFingerprint)) activeSlot = configuredSlot;
   recoveryAvailable = activeSlot >= 0;
   bool restoreInProgress = recoveryFs->exists(RESTORE_MARKER_FILE);
-  currentFingerprint = fingerprintCurrent();
   confirmedFingerprint = recoveryAvailable ? fingerprintWorkingSet(slotRoot(activeSlot)) : Fingerprint{};
   if (recoveryAvailable && !confirmedFingerprint.valid) {
     activeSlot = -1;

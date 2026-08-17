@@ -52,4 +52,8 @@ inline bool recoveryShouldRetryFastLedInitialization(uint32_t channelCount, uint
   return channelCount == 0 && lightCount > 0 && ledPinCount > 0;
 }
 
+inline bool recoveryMayUpgradeLegacySlot(bool failureReset, bool rootsReadable, bool liveFingerprintValid, bool slotMatchesLive) {
+  return !failureReset && rootsReadable && liveFingerprintValid && slotMatchesLive;
+}
+
 #endif

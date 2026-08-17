@@ -291,6 +291,14 @@ TEST_CASE("configured FastLED output retries only when channels are missing") {
   CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 95, 0));
 }
 
+TEST_CASE("legacy recovery upgrade never adopts live state after a failure") {
+  CHECK(recoveryMayUpgradeLegacySlot(false, true, true, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(true, true, true, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, false, true, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, true, false, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, true, true, false));
+}
+
 TEST_CASE("coalesced snapshots exclude an origin only when every update shares it") {
   CHECK_FALSE(coalescedSnapshotOriginsMixed(false, false, false));
   CHECK_FALSE(coalescedSnapshotOriginsMixed(true, false, true));
