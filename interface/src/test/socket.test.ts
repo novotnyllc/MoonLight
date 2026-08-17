@@ -81,4 +81,21 @@ describe('socket lifecycle', () => {
 			data: 'monitor'
 		});
 	});
+
+	it('subscribes before notifying open listeners', () => {
+		const socket = createWebSocket();
+		socket.on('monitor', () => undefined);
+		socket.on('open', () => {
+			const current = MockWebSocket.instances[0];
+			expect(msgpack.decode(current.sent[0] as Uint8Array)).toEqual({
+				event: 'subscribe',
+				data: 'monitor'
+			});
+		});
+
+		socket.init('ws://device/ws/events');
+		const current = MockWebSocket.instances[0];
+		current.readyState = MockWebSocket.OPEN;
+		current.onopen!(new Event('open'));
+	});
 });
