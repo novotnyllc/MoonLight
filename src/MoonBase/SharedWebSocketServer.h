@@ -15,13 +15,11 @@
 #include <PsychicHttp.h>
 
 #include <map>
-#include <set>
 
 #include "Module.h"
 
 class SharedWebSocketServer {
  private:
-  std::set<int> _initializedSockets;  // Sockets that have received initial data
   PsychicWebSocketHandler _handler;
   PsychicHttpServer* _server;
   SecurityManager* _securityManager;
@@ -49,13 +47,12 @@ class SharedWebSocketServer {
     _handler.onFrame([this](PsychicWebSocketRequest* request, httpd_ws_frame* frame) {
       ESP_LOGV(SVK_TAG, "ws[%s][%u] opcode[%d]", request->client()->remoteIP().toString().c_str(), request->client()->socket(), frame->type);
 
-      int socket = request->client()->socket();
-
-      // Check if this is the first frame for this socket
-      if (_initializedSockets.find(socket) == _initializedSockets.end()) {
-        _initializedSockets.insert(socket);
-        // Send initial state
-        transmitData(request->url(), request->client(), WEB_SOCKET_ORIGIN);
+      if (request->client()->isNew) {
+        // Send initial state synchronously on the established request. Mark the
+        // connection initialized only after the reply succeeds so a transient send
+        // failure can be retried by the next frame.
+        if (transmitInitialData(request->url(), request, WEB_SOCKET_ORIGIN))
+          request->client()->isNew = false;
       }
 
       // Handle incoming frame data
@@ -76,9 +73,8 @@ class SharedWebSocketServer {
     });
 
     // ADDED: Better logging in onClose
-    _handler.onClose([this](PsychicWebSocketClient* client) {
+    _handler.onClose([](PsychicWebSocketClient* client) {
       ESP_LOGI(SVK_TAG, "ws[%s][%u] disconnect", client->remoteIP().toString().c_str(), client->socket());
-      _initializedSockets.erase(client->socket());
     });
 
     _server->on("/ws/*", &_handler);
@@ -87,6 +83,17 @@ class SharedWebSocketServer {
   String clientId(PsychicWebSocketClient* client) { return WEB_SOCKET_ORIGIN_CLIENT_ID_PREFIX + String(client->socket()); }
 
  private:
+  bool serializeData(const String& path, const String& originId, String& buffer) {
+    Module* module = findModule(path);
+    if (!module) return false;
+
+    JsonDocument doc(PsychicJsonAllocator::instance());
+    JsonObject root = doc.to<JsonObject>();
+    module->read(root, ModuleState::read, originId);
+    serializeJson(doc, buffer);
+    return buffer.length() > 0;
+  }
+
   void transmitId(PsychicWebSocketClient* client) {
     JsonDocument doc;
     JsonObject root = doc.to<JsonObject>();
@@ -98,17 +105,16 @@ class SharedWebSocketServer {
     client->sendMessage(buffer.c_str());
   }
 
-  void transmitData(const String& path, PsychicWebSocketClient* client, const String& originId) {
-    Module* module = findModule(path);
-    if (!module) return;
-
-    JsonDocument doc;
-    JsonObject root = doc.to<JsonObject>();
-    module->read(root, ModuleState::read, originId);
+  bool transmitInitialData(const String& path, PsychicWebSocketRequest* request, const String& originId) {
     String buffer;
-    serializeJson(doc, buffer);
+    return serializeData(path, originId, buffer) && request->reply(buffer.c_str()) == ESP_OK;
+  }
 
-    if (buffer.length() == 0) return;
+  void transmitData(const String& path, PsychicWebSocketClient* client, const String& originId) {
+    if (!client && _handler.count() == 0) return;
+
+    String buffer;
+    if (!serializeData(path, originId, buffer)) return;
     const char* data = buffer.c_str();
 
     if (client) {

@@ -144,6 +144,13 @@ class LayerManager {
     state->data.remove("start");
     state->data.remove("end");
     state->data.remove("brightness");
+    // Clear the selected layer's canonical bounds as well. compareRecursive only visits keys
+    // present in the incoming preset, so retaining a previous preset's suffix would make an old
+    // bare field look canonical and defeat the needsRestore migration window below.
+    Char<16> selectedKey;
+    selectedKey.format("start_%d", selectedLayer); state->data.remove(selectedKey.c_str());
+    selectedKey.format("end_%d", selectedLayer); state->data.remove(selectedKey.c_str());
+    selectedKey.format("brightness_%d", selectedLayer); state->data.remove(selectedKey.c_str());
 
     // schedule restore so non-selected layers from the new preset are rebuilt after readFromFS
     needsRestore = true;
@@ -215,38 +222,48 @@ class LayerManager {
     if (updatedItem.name == "brightness") {
       VirtualLayer* layer = layerP.ensureLayer(selectedLayer);
       if (!layer) return true;
+      Char<16> key;
+      key.format("brightness_%d", selectedLayer);
       // Old presets stored the global brightness under bare "brightness"; new presets use "brightness_0".
-      // If "brightness_0" is absent this is an old preset — keep layer brightness at 255 (100%).
-      if (state->data["brightness_0"].isNull()) {
+      // Suppress that legacy field only while a persisted restore is pending. A live bare field is
+      // the public control update and must apply to the selected layer.
+      if (needsRestore && state->data[key.c_str()].isNull()) {
         EXT_LOGD(ML_TAG, "Old preset: ignoring bare 'brightness' (was global, not layer), using default 255");
         return true;
       }
       layer->brightness = updatedItem.value.as<uint8_t>();
+      state->data[key.c_str()] = layer->brightness;
       return true;
     }
     if (updatedItem.name == "start") {
       VirtualLayer* layer = layerP.ensureLayer(selectedLayer);
       if (!layer) return true;
+      Char<16> key;
+      key.format("start_%d", selectedLayer);
       // Old presets stored pixel coordinates under bare "start"/"end"; new presets use "start_0".
-      // If "start_0" is absent this is an old preset — keep the default {0,0,0} set by prepareForPresetLoad.
-      if (state->data["start_0"].isNull()) {
+      // Ignore absent per-layer state only during legacy persisted restore, not during live edits.
+      if (needsRestore && state->data[key.c_str()].isNull()) {
         EXT_LOGD(ML_TAG, "Old preset: ignoring bare 'start' pixel coords, using default {0,0,0}");
         return true;
       }
       layer->startPct = {updatedItem.value["x"].as<int>(), updatedItem.value["y"].as<int>(), updatedItem.value["z"].as<int>()};
+      state->data[key.c_str()].set(updatedItem.value);
       layerP.requestMapVirtual = true;
       return true;
     }
     if (updatedItem.name == "end") {
       VirtualLayer* layer = layerP.ensureLayer(selectedLayer);
       if (!layer) return true;
+      Char<16> key;
+      key.format("end_%d", selectedLayer);
       // Old presets stored pixel coordinates under bare "start"/"end"; new presets use "end_0".
-      // If "end_0" is absent this is an old preset — keep the default {100,100,100} set by prepareForPresetLoad.
-      if (state->data["end_0"].isNull()) {
+      // Ignore absent per-layer state only during legacy persisted restore, not during live edits.
+      if (needsRestore && state->data[key.c_str()].isNull()) {
         EXT_LOGD(ML_TAG, "Old preset: ignoring bare 'end' pixel coords, using default {100,100,100}");
         return true;
       }
       layer->endPct = {updatedItem.value["x"] | 100, updatedItem.value["y"] | 100, updatedItem.value["z"] | 100};
+      state->data[key.c_str()].set(updatedItem.value);
       layerP.requestMapVirtual = true;
       return true;
     }

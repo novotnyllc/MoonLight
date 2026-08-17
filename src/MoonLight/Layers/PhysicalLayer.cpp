@@ -111,21 +111,23 @@ void PhysicalLayer::loop20ms() {
 void PhysicalLayer::processMappings() {
   if (requestMapPhysical.load() || requestMapVirtual.load()) {
     LayerMappingGuard mappingGuard(mappingMutex);
-    if (requestMapPhysical.load()) {
+    // Consume before mapping so a request raised during this pass survives for
+    // the next iteration instead of being erased after the work completes.
+    if (requestMapPhysical.exchange(false)) {
       EXT_LOGD(ML_TAG, "mapLayout physical requested");
       pass = 1;
       mapLayout();
-      requestMapPhysical.store(false);
       requestMapVirtual.store(true);  // pass 2 must follow pass 1
     }
 
     if (requestMapVirtual.load()) {
       // Pass 2 writes to channelsD after monitor consumes pass-1 positions.
       if (lights.header.isPositions == 2) return;
-      EXT_LOGD(ML_TAG, "mapLayout virtual requested");
-      pass = 2;
-      mapLayout();
-      requestMapVirtual.store(false);
+      if (requestMapVirtual.exchange(false)) {
+        EXT_LOGD(ML_TAG, "mapLayout virtual requested");
+        pass = 2;
+        mapLayout();
+      }
     }
   }
 }

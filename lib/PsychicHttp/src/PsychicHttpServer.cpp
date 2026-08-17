@@ -28,6 +28,7 @@ PsychicHttpServer::PsychicHttpServer() :
   config.global_user_ctx = this;
   config.global_user_ctx_free_fn = destroy;
   config.max_uri_handlers = 20;
+  config.lru_purge_enable = true;
   //🌙
   #ifdef HTTPD_STACK_SIZE
     config.stack_size = HTTPD_STACK_SIZE;

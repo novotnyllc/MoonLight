@@ -13,6 +13,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
+#include <functional>
+
+#include "MdnsRegistrationPolicy.h"
 #include "MoonBase/utilities/BoardNames.h"
 #include "MoonBase/utilities/Char.h"
 #include "MoonBase/utilities/Coord3D.h"
@@ -22,6 +25,21 @@
 // ============================================================
 // Tests
 // ============================================================
+
+TEST_CASE("late mDNS registration announces immediately and keeps GOT_IP handler") {
+  std::function<void()> gotIpHandler;
+  int announcements = 0;
+
+  registerMdnsStaGotIp(
+      [&](auto handler) { gotIpHandler = handler; },
+      []() { return true; },
+      [&]() { ++announcements; });
+
+  CHECK_EQ(announcements, 1);
+  REQUIRE(gotIpHandler);
+  gotIpHandler();
+  CHECK_EQ(announcements, 2);
+}
 
 TEST_CASE("gcd") {
   CHECK_EQ(gcd(12, 18), 6);
@@ -264,6 +282,13 @@ TEST_CASE("PDM keeps requested affinity persistent while forcing effective RMT")
   CHECK_EQ(persistedAffinity, 3);
   CHECK_EQ(recoveryEffectiveAffinity(persistedAffinity, true), 1);
   CHECK_EQ(recoveryEffectiveAffinity(persistedAffinity, false), 3);
+}
+
+TEST_CASE("configured FastLED output retries only when channels are missing") {
+  CHECK(recoveryShouldRetryFastLedInitialization(0, 95, 1));
+  CHECK_FALSE(recoveryShouldRetryFastLedInitialization(1, 95, 1));
+  CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 0, 1));
+  CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 95, 0));
 }
 
 TEST_CASE("coalesced snapshots exclude an origin only when every update shares it") {

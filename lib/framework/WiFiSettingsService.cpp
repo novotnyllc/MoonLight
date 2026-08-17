@@ -15,7 +15,6 @@
 #include <WiFiSettingsService.h>
 
 #include <ESP32SvelteKit.h> // 🌙 safeMode
-#include <esp_heap_caps.h>
 #if FT_ENABLED(FT_ETHERNET)
 #include <ETH.h> // 🌙 ETH.connected() check in manageSTA()
 #endif
@@ -279,38 +278,14 @@ void WiFiSettingsService::loop()
 {
     unsigned long currentMillis = millis();
     static unsigned long lastMdnsAnnounce = 0;
-    static bool mdnsSuspendedForMemory = false;
 
-    if (!safeModeMB && WiFi.isConnected())
-    {
-        esp_netif_t *netif = WiFi.STA.netif();
-        size_t largestInternalBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (netif && !mdnsSuspendedForMemory && largestInternalBlock < 4096)
-        {
-            if (mdns_netif_action(netif, MDNS_EVENT_DISABLE_IP4) == ESP_OK)
-            {
-                mdnsSuspendedForMemory = true;
-                ESP_LOGW(SVK_TAG, "mDNS suspended: largest internal block is %u bytes", largestInternalBlock);
-            }
-        }
-        else if (netif && mdnsSuspendedForMemory && largestInternalBlock > 8192)
-        {
-            if (mdns_netif_action(netif, static_cast<mdns_event_actions_t>(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4)) == ESP_OK)
-            {
-                mdnsSuspendedForMemory = false;
-                lastMdnsAnnounce = currentMillis;
-                ESP_LOGW(SVK_TAG, "mDNS restored: largest internal block is %u bytes", largestInternalBlock);
-            }
-        }
-    }
-
-    if (!safeModeMB && WiFi.isConnected() && !mdnsSuspendedForMemory && (unsigned long)(currentMillis - lastMdnsAnnounce) >= 60000UL)
+    if (!safeModeMB && WiFi.isConnected() && (unsigned long)(currentMillis - lastMdnsAnnounce) >= 60000UL)
     {
         lastMdnsAnnounce = currentMillis;
         esp_netif_t *netif = WiFi.STA.netif();
         if (netif)
         {
-            mdns_netif_action(netif, static_cast<mdns_event_actions_t>(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4));
+            mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
         }
     }
 

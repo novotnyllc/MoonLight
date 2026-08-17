@@ -14,8 +14,80 @@
 
 #include <ESP32SvelteKit.h>
 #include <ConfigRecovery.h>
+#include <MdnsRegistrationPolicy.h>
 #include <RecoveryPolicy.h>
-#include <esp_heap_caps.h>
+#include <errno.h>
+#include <sys/socket.h>
+
+namespace {
+bool sendAll(int socket, const uint8_t *data, size_t length)
+{
+    while (length > 0)
+    {
+        const ssize_t sent = ::send(socket, data, length, MSG_NOSIGNAL);
+        if (sent < 0 && errno == EINTR) continue;
+        if (sent <= 0) return false;
+        data += sent;
+        length -= static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+esp_err_t sendEmbeddedGzip(PsychicRequest *request, const char *contentType, const uint8_t *content, size_t length)
+{
+    httpd_req_t *req = request->request();
+    const int socket = httpd_req_to_sockfd(req);
+    if (socket < 0) return ESP_FAIL;
+
+    const timeval sendTimeout = {5, 0};
+    if (setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout)) != 0)
+    {
+        httpd_sess_trigger_close(req->handle, socket);
+        return ESP_FAIL;
+    }
+
+    constexpr size_t scratchSize = 512;
+    uint8_t scratch[scratchSize];
+
+    char headers[384];
+    const int headerLength = snprintf(
+        headers,
+        sizeof(headers),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %lu\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Headers: Accept, Content-Type, Authorization\r\n"
+        "Access-Control-Allow-Credentials: true\r\n"
+        "Content-Encoding: gzip\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: close\r\n\r\n",
+        contentType,
+        static_cast<unsigned long>(length));
+    if (headerLength <= 0 || static_cast<size_t>(headerLength) >= sizeof(headers))
+    {
+        httpd_sess_trigger_close(req->handle, socket);
+        return ESP_FAIL;
+    }
+
+    bool sent = sendAll(socket, reinterpret_cast<const uint8_t *>(headers), static_cast<size_t>(headerLength));
+    for (size_t offset = 0; sent && offset < length; offset += scratchSize)
+    {
+        const size_t size = length - offset < scratchSize ? length - offset : scratchSize;
+        memcpy(scratch, content + offset, size);
+        sent = sendAll(socket, scratch, size);
+    }
+
+    if (!sent)
+    {
+        httpd_sess_trigger_close(req->handle, socket);
+        return ESP_FAIL;
+    }
+
+    ::shutdown(socket, SHUT_WR);
+    return ESP_OK;
+}
+}
 
 //🌙 added to telemetry
 bool safeModeMB = false; // 🌙 see .h
@@ -116,32 +188,7 @@ bool ESP32SvelteKit::begin()
         {
             PsychicHttpRequestCallback requestHandler = [contentType, content, len](PsychicRequest *request)
             {
-                PsychicResponse response(request);
-                response.setCode(200);
-                response.setContentType(contentType.c_str());
-                response.addHeader("Content-Encoding", "gzip");
-                response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
-                // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
-                size_t chunkSize = 512;
-                uint8_t *chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-                if (!chunk) {
-                    chunkSize = 256;
-                    chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-                }
-                if (!chunk) return PsychicResponse::sendServiceUnavailable(request);
-                response.sendHeaders();
-                for (size_t offset = 0; offset < len; offset += chunkSize)
-                {
-                    size_t size = len - offset < chunkSize ? len - offset : chunkSize;
-                    memcpy(chunk, content + offset, size);
-                    esp_err_t err = response.sendChunk(chunk, size);
-                    if (err != ESP_OK) {
-                        heap_caps_free(chunk);
-                        return err;
-                    }
-                }
-                heap_caps_free(chunk);
-                return response.finishChunking();
+                return sendEmbeddedGzip(request, contentType.c_str(), content, len);
             };
             PsychicWebHandler *handler = new PsychicWebHandler();
             handler->onRequest(requestHandler);
@@ -194,15 +241,24 @@ bool ESP32SvelteKit::begin()
         MDNS.addService("http", "tcp", 80);
         MDNS.addService("ws", "tcp", 80);
         MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
-        WiFi.onEvent(
-            [](WiFiEvent_t, WiFiEventInfo_t) {
-                esp_netif_t *netif = WiFi.STA.netif();
-                if (netif)
-                {
-                    mdns_netif_action(netif, static_cast<mdns_event_actions_t>(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4));
-                }
+        auto announceMdnsSta = []() {
+            esp_netif_t *netif = WiFi.STA.netif();
+            if (netif)
+            {
+                if (mdns_netif_action(netif, MDNS_EVENT_ENABLE_IP4) == ESP_OK)
+                    mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
+            }
+        };
+        registerMdnsStaGotIp(
+            [](auto announce) {
+                WiFi.onEvent(
+                    [announce](WiFiEvent_t, WiFiEventInfo_t) {
+                        announce();
+                    },
+                    WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
             },
-            WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+            []() { return WiFi.isConnected(); },
+            announceMdnsSta);
         ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
     }
     else

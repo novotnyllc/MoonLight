@@ -65,6 +65,11 @@ class SharedFSPersistence {
       readFromFS(pair.first);
     }
 
+    // Persisted reads deliberately suppress propagation. Publish the settled IO
+    // state once, after every pin consumer has restored its own state, so drivers
+    // initialize even when the later board-default pass is unchanged.
+    if (inputOutput != _modules.end()) inputOutput->second.module->callUpdateHandlers(inputOutput->first);
+
     // Register update handlers for modules that requested delayed writing
     for (const auto& pair : _modules) {
       if (pair.second.delayedWriting) {

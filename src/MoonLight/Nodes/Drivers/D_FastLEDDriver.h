@@ -243,8 +243,19 @@ class FastLEDDriver : public DriverNode {
   }
 
   uint16_t savedMaxPower = UINT16_MAX;
+  uint32_t lastInitRetry = 0;
   void loop() override {
     // DriverNode::loop(); // no need to call this as FastLED is not using ledsDriver LUT tables ...
+
+    if (recoveryShouldRetryFastLedInitialization(FastLED.count(), layerP.lights.header.nrOfLights, layerP.nrOfLedPins)) {
+      uint32_t now = millis();
+      if ((uint32_t)(now - lastInitRetry) >= 1000) {
+        lastInitRetry = now;
+        layerP.requestMapPhysical.store(true);
+        EXT_LOGW(ML_TAG, "FastLED has no channels for %u lights on %u pins; retrying physical map", layerP.lights.header.nrOfLights, layerP.nrOfLedPins);
+      }
+      return;
+    }
 
     if (FastLED.count()) {
       if (FastLED.getBrightness() != layerP.lights.header.brightness) {

@@ -24,6 +24,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <string>
 #include <thread>
 #include <vector>
 #include <cstring>
@@ -51,10 +52,13 @@ struct Node {
   void requestMappings() {}
 };
 
-// UpdatedItem stub (used by handleUpdate, not tested here)
+// UpdatedItem stub
 struct UpdatedItem {
-  struct Parent { const char* operator[](int) const { return ""; } } parent;
-  const char* name = "";
+  struct Parent {
+    std::string values[2];
+    const std::string& operator[](int index) const { return values[index]; }
+  } parent;
+  std::string name;
   JsonVariantConst value;
 };
 
@@ -357,6 +361,79 @@ struct Fixture {
     state.data["nodes"].to<JsonArray>();
   }
 };
+
+static UpdatedItem updateFrom(JsonDocument& doc, const char* name) {
+  UpdatedItem item;
+  item.name = name;
+  item.value = doc.as<JsonVariantConst>();
+  return item;
+}
+
+TEST_CASE("live bare layer controls apply to the selected layer and mirror canonical state") {
+  Fixture f;
+  f.lm.selectLayer(2, false);
+
+  JsonDocument brightness;
+  brightness.set(123);
+  CHECK(f.lm.handleUpdate(updateFrom(brightness, "brightness")));
+  CHECK_EQ(layerP.layers[2]->brightness, 123);
+  CHECK_EQ(f.state.data["brightness_2"].as<int>(), 123);
+
+  JsonDocument start;
+  start["x"] = 10; start["y"] = 20; start["z"] = 30;
+  CHECK(f.lm.handleUpdate(updateFrom(start, "start")));
+  CHECK_EQ(layerP.layers[2]->startPct.x, 10);
+  CHECK_EQ(f.state.data["start_2"]["y"].as<int>(), 20);
+
+  JsonDocument end;
+  end["x"] = 80; end["y"] = 90; end["z"] = 100;
+  CHECK(f.lm.handleUpdate(updateFrom(end, "end")));
+  CHECK_EQ(layerP.layers[2]->endPct.x, 80);
+  CHECK_EQ(f.state.data["end_2"]["y"].as<int>(), 90);
+  CHECK(layerP.requestMapVirtual);
+}
+
+TEST_CASE("legacy restore ignores bare controls only while canonical layer state is absent") {
+  Fixture f;
+  // A prior canonical preset must not make a following legacy preset look canonical.
+  f.state.data["brightness_0"] = 77;
+  f.state.data["start_0"]["x"] = 12;
+  f.lm.prepareForPresetLoad();
+  CHECK(f.state.data["brightness_0"].isNull());
+  CHECK(f.state.data["start_0"].isNull());
+
+  JsonDocument legacyBrightness;
+  legacyBrightness.set(42);
+  CHECK(f.lm.handleUpdate(updateFrom(legacyBrightness, "brightness")));
+  CHECK_EQ(layerP.layers[0]->brightness, 255);
+  CHECK(f.state.data["brightness_0"].isNull());
+
+  JsonDocument legacyStart;
+  legacyStart["x"] = 16; legacyStart["y"] = 16; legacyStart["z"] = 1;
+  CHECK(f.lm.handleUpdate(updateFrom(legacyStart, "start")));
+  CHECK_EQ(layerP.layers[0]->startPct.x, 0);
+  CHECK(f.state.data["start_0"].isNull());
+}
+
+TEST_CASE("canonical persisted controls still apply during the restore window") {
+  Fixture f;
+  f.state.data["brightness_0"] = 88;
+  f.state.data["start_0"]["x"] = 7;
+  f.state.data["start_0"]["y"] = 8;
+  f.state.data["start_0"]["z"] = 9;
+  f.lm.scheduleRestore();
+
+  JsonDocument brightness;
+  brightness.set(88);
+  CHECK(f.lm.handleUpdate(updateFrom(brightness, "brightness")));
+  CHECK_EQ(layerP.layers[0]->brightness, 88);
+
+  JsonDocument start;
+  start["x"] = 7; start["y"] = 8; start["z"] = 9;
+  CHECK(f.lm.handleUpdate(updateFrom(start, "start")));
+  CHECK_EQ(layerP.layers[0]->startPct.x, 7);
+  CHECK_EQ(f.state.data["start_0"]["z"].as<int>(), 9);
+}
 
 // ---------------------------------------------------------------------------
 // selectLayer — JSON state swap

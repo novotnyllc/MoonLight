@@ -14,6 +14,8 @@
 
 #include <ArduinoJson.h>
 
+#include <functional>
+
 // ============================================================
 // Copied from Module.cpp — keep in sync with the original
 // ============================================================
@@ -213,4 +215,36 @@ TEST_CASE("setDefaults: mixed types with rows skipped") {
   CHECK(controls["nodes"].isNull());
   CHECK(controls["active"] == false);
   CHECK(controls.size() == 3);  // rows not included
+}
+
+TEST_CASE("settled IO state is published once after persistence loads") {
+  struct FakeInputOutput {
+    int persistedLedPins = 0;
+    int publishedLedPins = 0;
+    int publishCount = 0;
+    std::function<void()> subscriber;
+
+    bool updateWithoutPropagation(int ledPins) {
+      if (persistedLedPins == ledPins) return false;
+      persistedLedPins = ledPins;
+      return true;
+    }
+
+    void callUpdateHandlers() {
+      ++publishCount;
+      subscriber();
+    }
+  } inputOutput;
+
+  inputOutput.subscriber = [&] { inputOutput.publishedLedPins = inputOutput.persistedLedPins; };
+
+  CHECK(inputOutput.updateWithoutPropagation(2));
+  CHECK_EQ(inputOutput.publishCount, 0);
+  inputOutput.callUpdateHandlers();  // SharedFSPersistence post-load publish
+  CHECK_EQ(inputOutput.publishCount, 1);
+  CHECK_EQ(inputOutput.publishedLedPins, 2);
+
+  CHECK_FALSE(inputOutput.updateWithoutPropagation(2));  // unchanged board-default pass
+  CHECK_EQ(inputOutput.publishCount, 1);
+  CHECK_EQ(inputOutput.publishedLedPins, 2);
 }
