@@ -12,11 +12,26 @@ export function hasConfiguredLights(info: unknown): boolean {
 	);
 }
 
-export const load: PageLoad = async ({ fetch }) => {
+export function authorizationHeader(security: boolean, storedUser: string | null): string {
+	if (!security) return 'Basic';
+	try {
+		const token = (JSON.parse(storedUser ?? '{}') as { bearer_token?: unknown }).bearer_token;
+		return 'Bearer ' + (typeof token === 'string' ? token : '');
+	} catch {
+		return 'Bearer ';
+	}
+}
+
+export const load: PageLoad = async ({ fetch, parent }) => {
 	let info: unknown;
 
 	try {
-		const response = await fetch('/rest/moonlightinfo');
+		const { features } = await parent();
+		const response = await fetch('/rest/moonlightinfo', {
+			headers: {
+				Authorization: authorizationHeader(features.security, localStorage.getItem('user'))
+			}
+		});
 		if (!response.ok) return {};
 		info = await response.json();
 	} catch {

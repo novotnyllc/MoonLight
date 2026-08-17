@@ -12,6 +12,8 @@
 	import { normalizePosition } from './monitor';
 	import SettingsCard from '$lib/components/SettingsCard.svelte';
 	import { socket } from '$lib/stores/socket';
+	import { user } from '$lib/stores/user';
+	import { page } from '$app/state';
 	import ControlIcon from '~icons/tabler/adjustments';
 
 	let el: HTMLCanvasElement;
@@ -26,6 +28,7 @@
 			const response = await fetch('/rest/monitorLayout', {
 				method: 'GET',
 				headers: {
+					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic',
 					'Content-Type': 'application/json'
 				}
 			});
