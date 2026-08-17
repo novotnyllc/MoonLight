@@ -16,78 +16,7 @@
 #include <ConfigRecovery.h>
 #include <MdnsRegistrationPolicy.h>
 #include <RecoveryPolicy.h>
-#include <errno.h>
-#include <sys/socket.h>
-
-namespace {
-bool sendAll(int socket, const uint8_t *data, size_t length)
-{
-    while (length > 0)
-    {
-        const ssize_t sent = ::send(socket, data, length, MSG_NOSIGNAL);
-        if (sent < 0 && errno == EINTR) continue;
-        if (sent <= 0) return false;
-        data += sent;
-        length -= static_cast<size_t>(sent);
-    }
-    return true;
-}
-
-esp_err_t sendEmbeddedGzip(PsychicRequest *request, const char *contentType, const uint8_t *content, size_t length)
-{
-    httpd_req_t *req = request->request();
-    const int socket = httpd_req_to_sockfd(req);
-    if (socket < 0) return ESP_FAIL;
-
-    const timeval sendTimeout = {5, 0};
-    if (setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout)) != 0)
-    {
-        httpd_sess_trigger_close(req->handle, socket);
-        return ESP_FAIL;
-    }
-
-    constexpr size_t scratchSize = 512;
-    uint8_t scratch[scratchSize];
-
-    char headers[384];
-    const int headerLength = snprintf(
-        headers,
-        sizeof(headers),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %lu\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Headers: Accept, Content-Type, Authorization\r\n"
-        "Access-Control-Allow-Credentials: true\r\n"
-        "Content-Encoding: gzip\r\n"
-        "Cache-Control: no-cache\r\n"
-        "Connection: close\r\n\r\n",
-        contentType,
-        static_cast<unsigned long>(length));
-    if (headerLength <= 0 || static_cast<size_t>(headerLength) >= sizeof(headers))
-    {
-        httpd_sess_trigger_close(req->handle, socket);
-        return ESP_FAIL;
-    }
-
-    bool sent = sendAll(socket, reinterpret_cast<const uint8_t *>(headers), static_cast<size_t>(headerLength));
-    for (size_t offset = 0; sent && offset < length; offset += scratchSize)
-    {
-        const size_t size = length - offset < scratchSize ? length - offset : scratchSize;
-        memcpy(scratch, content + offset, size);
-        sent = sendAll(socket, scratch, size);
-    }
-
-    if (!sent)
-    {
-        httpd_sess_trigger_close(req->handle, socket);
-        return ESP_FAIL;
-    }
-
-    ::shutdown(socket, SHUT_WR);
-    return ESP_OK;
-}
-}
+#include <esp_heap_caps.h>
 
 //🌙 added to telemetry
 bool safeModeMB = false; // 🌙 see .h
@@ -188,7 +117,32 @@ bool ESP32SvelteKit::begin()
         {
             PsychicHttpRequestCallback requestHandler = [contentType, content, len](PsychicRequest *request)
             {
-                return sendEmbeddedGzip(request, contentType.c_str(), content, len);
+                PsychicResponse response(request);
+                response.setCode(200);
+                response.setContentType(contentType.c_str());
+                response.addHeader("Content-Encoding", "gzip");
+                response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
+                // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
+                size_t chunkSize = 512;
+                uint8_t *chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                if (!chunk) {
+                    chunkSize = 256;
+                    chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                }
+                if (!chunk) return PsychicResponse::sendServiceUnavailable(request);
+                response.sendHeaders();
+                for (size_t offset = 0; offset < len; offset += chunkSize)
+                {
+                    size_t size = len - offset < chunkSize ? len - offset : chunkSize;
+                    memcpy(chunk, content + offset, size);
+                    esp_err_t err = response.sendChunk(chunk, size);
+                    if (err != ESP_OK) {
+                        heap_caps_free(chunk);
+                        return err;
+                    }
+                }
+                heap_caps_free(chunk);
+                return response.finishChunking();
             };
             PsychicWebHandler *handler = new PsychicWebHandler();
             handler->onRequest(requestHandler);
