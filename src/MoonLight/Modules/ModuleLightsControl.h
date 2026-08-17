@@ -21,6 +21,7 @@
   #include "MoonBase/Modules/FileManager.h"
   #include "MoonBase/Nodes.h"                // for Node::updateControl
   #include "MoonBase/utilities/PlatformFunctions.h"  //for isInPSRAM
+  #include "MoonLight/Modules/DigNext2ButtonPolicy.h"
   #include "palettes.h"
   #if FT_LIVESCRIPT
     #include "MoonBase/LiveScriptNode.h"
@@ -63,7 +64,10 @@ class ModuleLightsControl : public Module {
   uint8_t pinRelayLightsOn = UINT8_MAX;
   uint8_t pinPushButtonLightsOn = UINT8_MAX;
   uint8_t pinToggleButtonLightsOn = UINT8_MAX;
+  uint8_t pinDigNext2Button1 = UINT8_MAX;
+  uint8_t pinDigNext2Button2 = UINT8_MAX;
   uint8_t pinPIR = UINT8_MAX;
+  bool softBlackout = false;
 
   ModuleLightsControl(PsychicHttpServer* server, ESP32SvelteKit* sveltekit, FileManager* fileManager, ModuleIO* moduleIO)
       : Module("lightscontrol", server, sveltekit)
@@ -240,6 +244,8 @@ class ModuleLightsControl : public Module {
           pinRelayLightsOn = UINT8_MAX;
           pinPushButtonLightsOn = UINT8_MAX;
           pinToggleButtonLightsOn = UINT8_MAX;
+          pinDigNext2Button1 = UINT8_MAX;
+          pinDigNext2Button2 = UINT8_MAX;
           pinPIR = UINT8_MAX;
           for (JsonObject pinObject : state.data["pins"].as<JsonArray>()) {
             uint8_t usage = pinObject["usage"];
@@ -272,6 +278,20 @@ class ModuleLightsControl : public Module {
                 EXT_LOGD(ML_TAG, "pinToggleButtonLightsOn found %d", pinToggleButtonLightsOn);
               } else
                 EXT_LOGE(MB_TAG, "gpio %d not valid", pinToggleButtonLightsOn);
+            } else if (usage == pin_DigNext2_Button1) {
+              if (GPIO_IS_VALID_GPIO(gpio)) {
+                pinDigNext2Button1 = gpio;
+                pinMode(pinDigNext2Button1, INPUT);
+                EXT_LOGD(ML_TAG, "pinDigNext2Button1 found %d", pinDigNext2Button1);
+              } else
+                EXT_LOGE(MB_TAG, "gpio %d not valid", pinDigNext2Button1);
+            } else if (usage == pin_DigNext2_Button2) {
+              if (GPIO_IS_VALID_GPIO(gpio)) {
+                pinDigNext2Button2 = gpio;
+                pinMode(pinDigNext2Button2, INPUT);
+                EXT_LOGD(ML_TAG, "pinDigNext2Button2 found %d", pinDigNext2Button2);
+              } else
+                EXT_LOGE(MB_TAG, "gpio %d not valid", pinDigNext2Button2);
             } else if (usage == pin_PIR) {
               if (GPIO_IS_VALID_GPIO(gpio)) {
                 pinPIR = gpio;
@@ -541,6 +561,80 @@ class ModuleLightsControl : public Module {
   LiveScriptNode* paletteNode = nullptr;
   #endif
 
+  int selectDigNext2Preset(bool backwards) {
+    JsonArray presetList = _state.data["preset"]["list"];
+    int selected = _state.data["preset"]["selected"] | 255;
+    int firstPreset = _state.data["firstPreset"] | 1;
+    int lastPreset = _state.data["lastPreset"] | 64;
+    return chooseDigNext2Preset(
+        presetList.size(), [&](size_t index) { return presetList[index].as<int>(); }, selected, firstPreset, lastPreset, backwards);
+  }
+
+  void requestPreset(int select) {
+    if (select < 0) return;
+
+    _fileManager->update(
+        [&](FilesState& state) {
+          state.updatedItems.push_back("/.config/effects.json");
+          return StateUpdateResult::CHANGED;
+        },
+        _moduleName);
+
+    JsonDocument doc;
+    JsonObject newState = doc.to<JsonObject>();
+    newState["preset"] = _state.data["preset"];
+    newState["preset"]["action"] = "click";
+    newState["preset"]["select"] = select;
+    update(newState, ModuleState::update, _moduleName);
+  }
+
+  void applySoftBlackout() {
+    uint8_t target = softBlackout ? 0 : 255;
+    for (VirtualLayer* layer : layerP.layers) {
+      if (!layer) continue;
+      if (layer->transitionTarget != target || layer->transitionBrightness != target || layer->transitionStep != 0) {
+        layer->startTransition(target, 0);
+      }
+    }
+  }
+
+  void setSoftBlackout(bool enabled) {
+    if (softBlackout == enabled) return;
+    softBlackout = enabled;
+    applySoftBlackout();
+    EXT_LOGI(ML_TAG, "Dig-Next-2 soft blackout %s", enabled ? "on" : "off");
+  }
+
+  void handleDigNext2ButtonAction(DigNext2ButtonAction action) {
+    switch (action) {
+    case DigNext2ButtonAction::NextPreset:
+      requestPreset(selectDigNext2Preset(false));
+      break;
+    case DigNext2ButtonAction::PreviousPreset:
+      requestPreset(selectDigNext2Preset(true));
+      break;
+    case DigNext2ButtonAction::ToggleSoftBlackout:
+      setSoftBlackout(!softBlackout);
+      break;
+    case DigNext2ButtonAction::WakeSoftBlackout:
+      setSoftBlackout(false);
+      break;
+    case DigNext2ButtonAction::None:
+      break;
+    }
+  }
+
+  void pollDigNext2Buttons(uint32_t now) {
+    if (pinDigNext2Button1 != UINT8_MAX) {
+      handleDigNext2ButtonAction(updateDigNext2Button(
+          digNext2Button1State, digitalRead(pinDigNext2Button1) == LOW, now, true, softBlackout));
+    }
+    if (pinDigNext2Button2 != UINT8_MAX) {
+      handleDigNext2ButtonAction(updateDigNext2Button(
+          digNext2Button2State, digitalRead(pinDigNext2Button2) == LOW, now, false, softBlackout));
+    }
+  }
+
   unsigned long lastPresetTime = 0;
   // see pinPushButtonLightsOn
   static constexpr unsigned long debounceDelay = 50;  // 50ms debounce
@@ -550,6 +644,8 @@ class ModuleLightsControl : public Module {
   int lastPushPinState = HIGH;
   int lastTogglePinState = HIGH;
   int lastPIRPinState = LOW;
+  DigNext2ButtonState digNext2Button1State;
+  DigNext2ButtonState digNext2Button2State;
 
   void loop20ms() override {
     Module::loop20ms();  // requestUIUpdate
@@ -562,42 +658,11 @@ class ModuleLightsControl : public Module {
       // bugfix;
       //  runInAppTask.push_back([&]() {
       //  load the xth preset from FS
-      JsonArray presetList = _state.data["preset"]["list"];
-
-      if (_state.data["firstPreset"] <= _state.data["lastPreset"]) {
-        uint8_t nextPreset = 0;
-
-        nextPreset = getNextItemInArray(presetList, _state.data["preset"]["selected"]);
-        // EXT_LOGD(ML_TAG, "loading next preset %d ", nextPreset);
-        while (nextPreset < _state.data["firstPreset"] || nextPreset > _state.data["lastPreset"]) {
-          nextPreset = getNextItemInArray(presetList, nextPreset);
-        }
-
-        // EXT_LOGD(ML_TAG, "loading next preset %d ", nextPreset);
-
-        // trigger file manager notification of update of effects.json
-        _fileManager->update(
-            [&](FilesState& state) {
-              state.updatedItems.push_back("/.config/effects.json");
-              // EXT_LOGD(ML_TAG, "   preset files %d %s", lastPresetLooped, presetFile.c_str());
-              return StateUpdateResult::CHANGED;  // notify StatefulService by returning CHANGED
-            },
-            _moduleName);
-
-        JsonDocument doc;
-        JsonObject newState = doc.to<JsonObject>();
-        newState["preset"] = _state.data["preset"];
-        newState["preset"]["action"] = "click";
-        newState["preset"]["select"] = nextPreset;
-
-        // update the state and ModuleState::update processes the changes behind the scenes
-        if (newState.size()) {
-          // serializeJson(doc, Serial);
-          // Serial.println();
-          update(newState, ModuleState::update, _moduleName);
-        }
-      }
+      requestPreset(selectDigNext2Preset(false));
     }
+
+    if (softBlackout) applySoftBlackout();
+    pollDigNext2Buttons(millis());
 
     if (pinPushButtonLightsOn != UINT8_MAX) {
       if ((millis() - lastPushDebounceTime) > debounceDelay) {
