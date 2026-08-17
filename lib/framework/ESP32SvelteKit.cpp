@@ -13,6 +13,7 @@
  **/
 
 #include <ESP32SvelteKit.h>
+#include <ConfigRecovery.h>
 #include <esp_heap_caps.h>
 
 //🌙 added to telemetry
@@ -76,6 +77,10 @@ void ESP32SvelteKit::begin()
 {
     ESP_LOGV(SVK_TAG, "Loading settings from files system");
     ESPFS.begin(true);
+#ifdef CONFIG_RECOVERY_ENABLED
+    ConfigRecovery::begin(&ESPFS, esp_reset_reason());
+    if (ConfigRecovery::restoredThisBoot()) safeModeMB = false;
+#endif
 
 #if FT_ENABLED(FT_WIFI) // 🌙
     // 🌙 Load WiFi state early so getSystemHostname() returns the configured hostname
@@ -174,7 +179,11 @@ void ESP32SvelteKit::begin()
 
     String mdnsHostname = getSystemHostname();
     mdnsHostname.toLowerCase();
-    if (MDNS.begin(mdnsHostname.c_str()))
+    if (safeModeMB)
+    {
+        ESP_LOGW(SVK_TAG, "Safe mode enabled; mDNS disabled until the next clean boot");
+    }
+    else if (MDNS.begin(mdnsHostname.c_str()))
     {
         MDNS.setInstanceName(mdnsHostname);
         MDNS.addService("http", "tcp", 80);
@@ -354,6 +363,10 @@ void ESP32SvelteKit::_loop()
         {
             function();
         }
+
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::loop(!safeModeMB && _connectionStatus != ConnectionStatus::OFFLINE && lps_all_snapshot > 0);
+#endif
 
         static int lastTime = 0;
         if (millis() - lastTime > 1000)

@@ -32,7 +32,7 @@ class ModuleEffects : public NodeManager {
   }
 
   void begin() override {
-    defaultNodeName = getNameAndTags<RandomEffect>();
+    defaultNodeName = safeModeMB ? getNameAndTags<SolidEffect>() : getNameAndTags<RandomEffect>();
     layerMgr.init(_state, nodes, requestUIUpdate);
     layerMgr.selectLayer(0, false);  // initial setup, no state to swap yet
     NodeManager::begin();
@@ -56,6 +56,8 @@ class ModuleEffects : public NodeManager {
 
     layerMgr.installReadHook();
   }
+
+  bool shouldLoadPersistedState() const override { return !safeModeMB; }
 
   void setupDefinition(const JsonArray& controls) override {
     EXT_LOGV(ML_TAG, "");

@@ -244,6 +244,11 @@ void NodeManager::handleNodeOnChange(const UpdatedItem& updatedItem, JsonVariant
 void NodeManager::handleNodeControlValueChange(const UpdatedItem& updatedItem, JsonVariant nodeState) {
   JsonObject control = nodeState["controls"][updatedItem.index[1]];
 
+  if (control["ro"] == true) {
+    readControl(control);
+    return;
+  }
+
   // if (control[updatedItem.name] == updatedItem.value) {
   //   return;  // avoid re-applying stale compareRecursive emissions
   // }

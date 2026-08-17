@@ -47,6 +47,7 @@ The current `1.0.0-whitevest.2` build stays online and serves small REST respons
 - R11. The intended native and LiveScript effect stack must survive sustained 3D rendering, audio-reactive input, Monitor/WebSocket traffic, effect switching, script reloads, save/reboot cycles, and invalid-script rejection without a panic or watchdog reset.
 - R12. Browser-upload and remote-download OTA paths must each restore a working app while preserving the saved controller configuration.
 - R13. The final curated Playa preset rotation must complete a multi-hour soak on the physically connected 95-pixel vest within its power and temperature limits before the golden snapshot is captured.
+- R14. Persistent runtime configuration and LiveScript files must remain provisional until ten minutes of connected, non-safe-mode operation with an active LED driver loop; a panic or watchdog reset before confirmation must restore the prior confirmed working set before configuration is loaded, without requiring network access.
 
 ## Planning Contract
 
@@ -57,8 +58,9 @@ The current `1.0.0-whitevest.2` build stays online and serves small REST respons
 - KTD3. **Keep the official microphone pins.** GPIO7/GPIO8 come from the QuinLED Dig-Next-2 pinout; correct the PDM driver or platform integration instead of guessing alternate wiring.
 - KTD4. **Prove audio at the data and effect layers.** “PDM active” alone is insufficient; nonzero changing samples and a visible reactive effect are required.
 - KTD5. **Preserve the proven layout and app-only recovery boundary.** No WLED, Live Script, filesystem erase, or full-flash write belongs in the fix cycle.
-- KTD6. **Use a generic Dig-Next-2 build identity.** Publish the runtime as `1.0.1-dignext2.6`; do not encode `whitevest` or `coat` in shared firmware identity.
+- KTD6. **Use a generic Dig-Next-2 build identity.** Publish the runtime as `1.0.1-dignext2.21`; do not encode `whitevest` or `coat` in shared firmware identity.
 - KTD7. **Package layouts together.** Reuse the existing native layout registry so a vest or coat controller selects its own layout from the same firmware image.
+- KTD8. **Rollback the working set, not individual modules.** Keep two verified on-device snapshots of `/.config` and `/livescripts`; promote by switching a small marker only after a stable probation window, and restore before any settings service starts.
 
 ### Scope Boundaries
 
@@ -102,9 +104,9 @@ The current `1.0.0-whitevest.2` build stays online and serves small REST respons
 
 - **Goal:** Deliver a review-settled versioned app artifact and install that exact artifact.
 - **Requirements:** R5, R6, R9, R10
-- **Dependencies:** U1, U2, U3
+- **Dependencies:** U1, U2, U3, U6
 - **Files:** `firmware/esp32-d0.ini`, `docs/plans/2026-08-16-2130-fix-vest-runtime-hardening-plan.md`
-- **Approach:** Build only `esp32-d0-pico2`, publish generic version `1.0.1-dignext2.6`, flash the app partition, and compare release and installed evidence by SHA-256.
+- **Approach:** Build only `esp32-d0-pico2`, publish generic version `1.0.1-dignext2.21`, flash the app partition, and compare release and installed evidence by SHA-256.
 - **Test scenarios:** Clean target build; secret scan; independent review; release asset digest equals the flashed app artifact; boot preserves the native map and Wi-Fi profile.
 - **Verification:** Merged PR, exact tag, release asset checksum, esptool write verification, stable boot, and passing HTTP/mDNS/audio checks.
 
@@ -117,6 +119,16 @@ The current `1.0.0-whitevest.2` build stays online and serves small REST respons
 - **Approach:** Ask for one physical action at a time. Validate low-brightness solid red, green, and blue across all 95 pixels before enabling the native map and sound-reactive effect. Curate and save the desired startup/effect presets, apply Playa security, export readable configuration, then read and checksum the complete flash only after every gate passes.
 - **Test scenarios:** Every pixel responds in RGB order; no reset or visible corruption occurs; mapped effect orientation is plausible; stacked native and LiveScript effects sustain the full virtual volume; sound changes the chosen reactive effects; effect switching/script reload/save/reboot and invalid-script rejection remain stable; both OTA routes preserve configuration; the curated preset rotation completes its soak; complete flash read verifies by checksum.
 - **Verification:** User-observed physical pass, stable controller status, and a recorded full-flash checksum and restore warning.
+
+### U6. Add offline whole-configuration rollback
+
+- **Goal:** Recover automatically from a crashing configuration without Wi-Fi or browser access.
+- **Requirements:** R6, R11, R12, R14
+- **Dependencies:** None
+- **Files:** `lib/framework/ConfigRecovery.h`, `lib/framework/ConfigRecovery.cpp`, `lib/framework/ESP32SvelteKit.cpp`, `lib/framework/SystemStatus.cpp`, `firmware/esp32-d0.ini`
+- **Approach:** Fingerprint `/.config` plus `/livescripts`, retain two verified snapshots, and promote the inactive slot only after ten stable connected minutes. On a panic or watchdog boot with a different working set, restore the confirmed slot before Wi-Fi or module state loads and restart once into it.
+- **Test scenarios:** First stable boot creates a confirmed slot; a later stable change replaces it; a panic/watchdog boot with unconfirmed files restores the prior slot; holding Button_1/GPIO34 continuously for three seconds during power-up restores the confirmed slot while a short or post-boot press does nothing; power loss during snapshot creation leaves the active slot usable; safe mode never promotes; insufficient flash leaves the previous slot active.
+- **Verification:** Status API reports available/pending/confirmation countdown; a controlled candidate change followed by a forced watchdog reset returns the complete prior Wi-Fi, security, driver, layout, effect, preset, and LiveScript set without network-assisted repair.
 
 ## Verification Contract
 

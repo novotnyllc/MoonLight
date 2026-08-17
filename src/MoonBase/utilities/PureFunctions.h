@@ -240,3 +240,28 @@ inline void updateControl(const JsonObject& control) {
     }
   }
 }
+
+/// Refreshes a JSON control from its bound runtime value. Read-only telemetry
+/// must never be overwritten by a stale persisted value during boot.
+inline void readControl(const JsonObject& control) {
+  if (control["p"].isNull()) return;
+  uintptr_t pointer = control["p"];
+  if (!pointer) return;
+
+  if (control["type"] == "slider" || control["type"] == "select" || control["type"] == "pin" || control["type"] == "number") {
+    if (control["size"] == 8) control["value"] = *reinterpret_cast<uint8_t*>(pointer);
+    else if (control["size"] == 108) control["value"] = *reinterpret_cast<int8_t*>(pointer);
+    else if (control["size"] == 16) control["value"] = *reinterpret_cast<uint16_t*>(pointer);
+    else if (control["size"] == 32) control["value"] = *reinterpret_cast<uint32_t*>(pointer);
+    else if (control["size"] == 33) control["value"] = *reinterpret_cast<int*>(pointer);
+    else if (control["size"] == 34) control["value"] = *reinterpret_cast<float*>(pointer);
+  } else if (control["type"] == "selectFile" || control["type"] == "text") {
+    control["value"] = reinterpret_cast<const char*>(pointer);
+  } else if (control["type"] == "checkbox" && control["size"] == sizeof(bool)) {
+    control["value"] = *reinterpret_cast<bool*>(pointer);
+#ifdef ARDUINO
+  } else if (control["type"] == "coord3D" && control["size"] == sizeof(Coord3D)) {
+    control["value"] = *reinterpret_cast<Coord3D*>(pointer);
+#endif
+  }
+}

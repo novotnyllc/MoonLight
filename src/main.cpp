@@ -78,6 +78,7 @@ void operator delete[](void* ptr, size_t size) noexcept {
 #endif
 
 #include <ESP32SvelteKit.h>
+#include <ConfigRecovery.h>
 #include <PsychicHttpServer.h>
 
 #define SERIAL_BAUD_RATE 115200
@@ -298,12 +299,32 @@ void setup() {
 
   Serial.printf("C++ Standard: %ld\n", __cplusplus);  // ok-lint: Serial used before logging is initialized
 
+#ifdef FACTORY_SAFE_MODE_BUTTON
+  pinMode(FACTORY_SAFE_MODE_BUTTON, INPUT);  // Dig-Next-2 has a hardware pull-up on GPIO34
+  delay(25);
+  if (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW) {
+    uint32_t pressedAt = millis();
+    while (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW && millis() - pressedAt < 3000) delay(25);
+    if (digitalRead(FACTORY_SAFE_MODE_BUTTON) != LOW) {
+      ESP_LOGW(ML_TAG, "Ignored short recovery-button press");
+    } else {
+#ifdef CONFIG_RECOVERY_ENABLED
+      ConfigRecovery::requestRestore();
+#endif
+      safeModeMB = true;
+      ESP_LOGW(ML_TAG, "Recovery Button_1 held for 3 seconds; requesting confirmed configuration or safe mode");
+    }
+  }
+#endif
+
 #if defined(BOARD_HAS_PSRAM)
   if (psramFound()) {
     // Initialize the ESP-IDF log path while internal memory is plentiful. Large
     // HTTP JSON documents use their own PSRAM allocator; performance-critical
     // FFT and DMA state retain the platform's normal internal-memory policy.
-    ESP_LOGI(ML_TAG, "PSRAM available for HTTP response documents");
+    // Warning level is retained in release builds and initializes the UART VFS
+    // lock before memory pressure can make an error log allocate it too late.
+    ESP_LOGW(ML_TAG, "PSRAM available for HTTP response documents");
   }
 #endif
 

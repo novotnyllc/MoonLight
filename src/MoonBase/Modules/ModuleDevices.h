@@ -189,6 +189,7 @@ class ModuleDevices : public Module {
   }
 
   void loop10s() override {
+    if (safeModeMB) return;
     if (!networkIsConnected()) return;
 
     // Bind each socket independently so a failure on one does not prevent the other from retrying

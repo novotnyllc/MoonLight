@@ -154,7 +154,9 @@ void FileManager::begin() {
   _webSocketServer.begin();
 
   // setup the file server
-  _server->serveStatic("/rest/file", ESPFS, "/");
+  _server->serveStatic("/rest/file", ESPFS, "/")->setFilter([](PsychicRequest* request) {
+    return request->uri().indexOf("/.config-recovery") < 0;
+  });
 
   _server->on("/rest/saveConfig", HTTP_POST,
               _sveltekit->getSecurityManager()->wrapRequest(

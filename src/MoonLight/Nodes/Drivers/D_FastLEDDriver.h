@@ -63,7 +63,7 @@ class FastLEDDriver : public DriverNode {
     addControl(status, "status", "text", 0, 32, true);
 
     ioUpdateHandler = moduleIO->addUpdateHandler([this](const String& originId) {
-      reserveRmtForPdm();
+      if (reserveRmtForPdm()) layerP.requestMapPhysical = true;
       uint8_t nrOfPins = MIN(layerP.nrOfLedPins, layerP.nrOfAssignedPins);
 
       EXT_LOGD(ML_TAG, "recreate channels and configs %s %d", originId.c_str(), nrOfPins);
@@ -94,8 +94,10 @@ class FastLEDDriver : public DriverNode {
 
   fl::EOrder rgbOrder = GRB;
   fl::ChannelOptions options = fl::ChannelOptions();
+  bool pdmForcesRmt = false;
+  uint8_t affinityBeforePdm = 0;
 
-  void reserveRmtForPdm() {
+  bool reserveRmtForPdm() {
     bool hasPdmData = false;
     bool hasPdmClock = false;
     moduleIO->read([&](ModuleState& state) {
@@ -105,11 +107,29 @@ class FastLEDDriver : public DriverNode {
         hasPdmClock = hasPdmClock || usage == pin_I2S_WS;
       }
     }, "FastLEDDriver");
-    if (hasPdmData && hasPdmClock) {
+    bool shouldForceRmt = hasPdmData && hasPdmClock;
+    if (shouldForceRmt && !pdmForcesRmt) {
+      affinityBeforePdm = affinity;
+      pdmForcesRmt = true;
       affinity = 1;
       updateControl("affinity", affinity);
       options.mAffinity = "RMT";
+      return true;
     }
+    if (!shouldForceRmt && pdmForcesRmt) {
+      pdmForcesRmt = false;
+      affinity = affinityBeforePdm;
+      updateControl("affinity", affinity);
+      switch (affinity) {
+      case 0: options.mAffinity = ""; break;
+      case 1: options.mAffinity = "RMT"; break;
+      case 2: options.mAffinity = "I2S"; break;
+      case 3: options.mAffinity = "SPI"; break;
+      case 4: options.mAffinity = "PARLIO"; break;
+      }
+      return true;
+    }
+    return false;
   }
 
   void onUpdate(const JsonObject& control) override {
@@ -321,6 +341,7 @@ class FastLEDDriver : public DriverNode {
       CRGB* leds = (CRGB*)layerP.lights.channelsD;
       uint16_t startLed = 0;
 
+      channels.clear();
       FastLED.clear(ClearFlags::CHANNELS);
       // FastLED.reset(ResetFlags::CHANNELS);
 
@@ -369,6 +390,7 @@ class FastLEDDriver : public DriverNode {
     auto& events = FastLED.channelEvents();
     events.onChannelCreated.clear();
     events.onChannelEnqueued.clear();
+    channels.clear();
     FastLED.clear(ClearFlags::CHANNELS);
     // FastLED.reset(ResetFlags::CHANNELS);
 

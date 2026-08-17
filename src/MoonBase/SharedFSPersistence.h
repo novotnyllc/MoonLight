@@ -14,6 +14,7 @@
 
 #include <FS.h>
 #include <StatefulService.h>
+#include <esp_system.h>
 
 #include "Module.h"
 
@@ -53,8 +54,15 @@ class SharedFSPersistence {
   }
 
   void begin() {
+    // Pin assignments are a dependency of LED, audio, button, and sensor nodes.
+    // The map is alphabetically ordered, so load the foundational IO module
+    // explicitly before node managers construct their persisted drivers.
+    auto inputOutput = _modules.find("inputoutput");
+    if (inputOutput != _modules.end()) readFromFS(inputOutput->first);
+
     // Read initial state from filesystem
     for (const auto& pair : _modules) {
+      if (inputOutput != _modules.end() && pair.first == inputOutput->first) continue;
       readFromFS(pair.first);
     }
 
@@ -90,6 +98,19 @@ class SharedFSPersistence {
     if (it == _modules.end()) return;
 
     ModuleInfo& info = it->second;
+    if (!info.module->shouldLoadPersistedState()) {
+      if (_fs->exists(info.filePath)) {
+        String recoveryPath = String("/.config/") + moduleName + ".recovery-" + String(esp_random(), HEX) + ".json";
+        if (_fs->rename(info.filePath, recoveryPath))
+          EXT_LOGW(MB_TAG, "Quarantined %s as %s", info.filePath.c_str(), recoveryPath.c_str());
+        else {
+          EXT_LOGE(MB_TAG, "Failed to quarantine %s", info.filePath.c_str());
+          return;
+        }
+      }
+      if (!writeToFSNow(moduleName)) EXT_LOGE(MB_TAG, "Failed to write safe defaults for %s", moduleName);
+      return;
+    }
     File file = _fs->open(info.filePath.c_str(), "r");
 
     if (file) {
