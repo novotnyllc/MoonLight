@@ -648,6 +648,7 @@ class ModuleLightsControl : public Module {
 
   #if FT_ENABLED(FT_MONITOR)
     extern SemaphoreHandle_t swapMutex;
+    LayerMappingReadGuard monitorGuard(layerP.mappingMutex);
 
     // Check and transition under lock
     xSemaphoreTake(swapMutex, portMAX_DELAY);

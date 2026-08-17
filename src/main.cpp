@@ -142,9 +142,13 @@ TaskHandle_t driverTaskHandle = nullptr;
     if (layerP.lights.header.isPositions == 0 && !newFrameReady) {  // within mutex as driver task can change this
       xSemaphoreGive(swapMutex);  // release so driver can run concurrently while effects write virtualChannels
 
-      uint32_t cycleStartE = esp_cpu_get_cycle_count();
+      {
+        // One read owner covers every exported layer/node/buffer pointer used by
+        // this frame, including asynchronous LiveScript completion and composite.
+        LayerMappingReadGuard frameGuard(layerP.mappingMutex);
+        uint32_t cycleStartE = esp_cpu_get_cycle_count();
 
-      layerP.loop();  // effects write to per-layer virtualChannels — runs in parallel with driver reading channelsD
+        layerP.loop();  // effects write to per-layer virtualChannels — runs in parallel with driver reading channelsD
 
       // Wait for all live script tasks to finish writing their frame
       #if FT_LIVESCRIPT
@@ -167,18 +171,15 @@ TaskHandle_t driverTaskHandle = nullptr;
       }
       #endif
 
-      esp32sveltekit.lps_effects_cycles += esp_cpu_get_cycle_count() - cycleStartE;
+        esp32sveltekit.lps_effects_cycles += esp_cpu_get_cycle_count() - cycleStartE;
 
-      if (millis() - last20ms >= 20) {
-        last20ms = millis();
-        layerP.loop20ms();
-      }
+        if (millis() - last20ms >= 20) {
+          last20ms = millis();
+          layerP.loop20ms();
+        }
 
-      // Wait for driver to finish reading channelsD, then composite virtualChannels into it
-      xSemaphoreTake(channelsDFreeSemaphore, portMAX_DELAY);
-      {
-        // Global lifetime lock order: mapping -> node task mutex -> swap.
-        LayerMappingReadGuard mappingGuard(layerP.mappingMutex);
+        // Wait for driver to finish reading channelsD, then composite virtualChannels into it.
+        xSemaphoreTake(channelsDFreeSemaphore, portMAX_DELAY);
         xSemaphoreTake(swapMutex, portMAX_DELAY);
         if (layerP.lights.header.isPositions == 0) {  // check if layout didn't start while we were unlocked
           layerP.compositeLayers();  // zero channelsD + composite all virtualChannels into it
@@ -208,38 +209,45 @@ TaskHandle_t driverTaskHandle = nullptr;
   static unsigned long last20ms = 0;
 
   while (true) {
-    bool mutexGiven = false;
+    bool frameProcessed = false;
     esp_task_wdt_reset();
-    // Check and transition state under lock
-    xSemaphoreTake(swapMutex, portMAX_DELAY);
-    if (layerP.lights.header.isPositions == 3) {
-      EXT_LOGD(ML_TAG, "positions done (3 -> 0)");
-      layerP.lights.header.isPositions = 0;
-    }
+    layerP.processMappings();
 
-    if (layerP.lights.header.isPositions == 0) {
-      if (newFrameReady) {
-        newFrameReady = false;
-        xSemaphoreGive(swapMutex);  // release lock before sending — effectTask writes virtualChannels concurrently
-        mutexGiven = true;
+    // Acquire mapping before swap to preserve the global mapping -> swap order.
+    // If a frame is ready, this lease is already active before we publish
+    // newFrameReady=false to the dependent effect task.
+    {
+      LayerMappingReadGuard driverFrameGuard(layerP.mappingMutex);
+      xSemaphoreTake(swapMutex, portMAX_DELAY);
+      if (layerP.lights.header.isPositions == 3) {
+        EXT_LOGD(ML_TAG, "positions done (3 -> 0)");
+        layerP.lights.header.isPositions = 0;
+      }
 
-        esp32sveltekit.lps_all++;
-        uint32_t cycleStartD = esp_cpu_get_cycle_count();
+      if (layerP.lights.header.isPositions == 0) {
+        if (newFrameReady) {
+          newFrameReady = false;
+          xSemaphoreGive(swapMutex);  // release lock before sending — effectTask writes virtualChannels concurrently
 
-        layerP.loopDrivers();
+          esp32sveltekit.lps_all++;
+          uint32_t cycleStartD = esp_cpu_get_cycle_count();
 
-        xSemaphoreGive(channelsDFreeSemaphore);  // signal: done reading channelsD, effectTask may now composite
+          layerP.loopDrivers();
 
-        esp32sveltekit.lps_drivers_cycles += esp_cpu_get_cycle_count() - cycleStartD;
+          xSemaphoreGive(channelsDFreeSemaphore);  // signal: done reading channelsD, effectTask may now composite
 
-        if (millis() - last20ms >= 20) {
-          last20ms = millis();
-          layerP.loop20msDrivers();
+          esp32sveltekit.lps_drivers_cycles += esp_cpu_get_cycle_count() - cycleStartD;
+
+          if (millis() - last20ms >= 20) {
+            last20ms = millis();
+            layerP.loop20msDrivers();
+          }
+          frameProcessed = true;
         }
       }
-    }
 
-    if (!mutexGiven) xSemaphoreGive(swapMutex);  // not double buffer or if conditions not met
+      if (!frameProcessed) xSemaphoreGive(swapMutex);
+    }
     vTaskDelay(1);
   }
   // Cleanup (never reached in this case, but good practice)

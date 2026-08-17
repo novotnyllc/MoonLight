@@ -210,6 +210,69 @@ TEST_CASE("shared lifetime readers overlap while writer waits and excludes new r
   lateReader.get();
 }
 
+TEST_CASE("effect frame keeps exported buffer alive through async script and composite") {
+  layerP.reset();
+  int* exportedBuffer = new int(0);
+  std::atomic<int> compositeValue{0};
+  std::atomic<bool> deleted{false};
+  std::promise<void> frameEntered;
+  std::promise<void> runScript;
+  std::shared_future<void> runScriptFuture(runScript.get_future());
+
+  auto script = std::async(std::launch::async, [&]() {
+    runScriptFuture.wait();
+    *exportedBuffer = 42;
+  });
+  auto frame = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard frameGuard(layerP.mappingMutex);
+    frameEntered.set_value();
+    script.get();
+    compositeValue.store(*exportedBuffer);
+  });
+  frameEntered.get_future().wait();
+
+  auto writer = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    delete exportedBuffer;
+    exportedBuffer = nullptr;
+    deleted.store(true);
+  });
+  while (layerP.mappingMutex.waitingWriterCountForTest() == 0) std::this_thread::yield();
+  CHECK(writer.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+  runScript.set_value();
+  CHECK(frame.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK_EQ(compositeValue.load(), 42);
+  CHECK(writer.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(deleted.load());
+}
+
+TEST_CASE("monitor reader keeps mapped buffer alive until its read completes") {
+  layerP.reset();
+  int* monitorBuffer = new int(95);
+  std::promise<void> monitorEntered;
+  std::promise<void> releaseMonitor;
+  std::shared_future<void> releaseMonitorFuture(releaseMonitor.get_future());
+
+  auto monitor = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard guard(layerP.mappingMutex);
+    monitorEntered.set_value();
+    releaseMonitorFuture.wait();
+    CHECK_EQ(*monitorBuffer, 95);
+  });
+  monitorEntered.get_future().wait();
+
+  auto remap = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    delete monitorBuffer;
+    monitorBuffer = nullptr;
+  });
+  CHECK(remap.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  releaseMonitor.set_value();
+  CHECK(monitor.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(remap.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------

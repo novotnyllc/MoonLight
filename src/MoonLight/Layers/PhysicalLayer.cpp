@@ -70,7 +70,6 @@ void PhysicalLayer::setup() {
 }
 
 void PhysicalLayer::loop() {
-  LayerMappingReadGuard guard(mappingMutex);
   if (!lights.channelsD || lights.header.nrOfChannels == 0) return;  // no layout yet or alloc failed
 
   // Effects write to per-layer virtualChannels; channelsD is zeroed and composited
@@ -93,7 +92,6 @@ void PhysicalLayer::loop() {
 }
 
 void PhysicalLayer::compositeLayers() {
-  LayerMappingReadGuard guard(mappingMutex);
   if (!lights.channelsD || lights.header.nrOfChannels == 0) return;  // no layout yet or alloc failed
 
   // Zero channelsD so additive layer blending starts from black each frame
@@ -106,14 +104,11 @@ void PhysicalLayer::compositeLayers() {
 }
 
 void PhysicalLayer::loop20ms() {
-  LayerMappingReadGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
   forEachPresentPointer(layers, [](VirtualLayer* layer) { layer->loop20ms(); });
 }
 
-void PhysicalLayer::loopDrivers() {
-  // Remap/topology mutation remains exclusive, but ordinary driver dispatch is
-  // read-side lifetime use and can overlap the effect task.
+void PhysicalLayer::processMappings() {
   if (requestMapPhysical.load() || requestMapVirtual.load()) {
     LayerMappingGuard mappingGuard(mappingMutex);
     if (requestMapPhysical.load()) {
@@ -133,9 +128,9 @@ void PhysicalLayer::loopDrivers() {
       requestMapVirtual.store(false);
     }
   }
+}
 
-  LayerMappingReadGuard guard(mappingMutex);
-
+void PhysicalLayer::loopDrivers() {
   // for physical layer nodes
   if (prevSize != lights.header.size) EXT_LOGD(ML_TAG, "onSizeChanged P %d,%d,%d -> %d,%d,%d", prevSize.x, prevSize.y, prevSize.z, lights.header.size.x, lights.header.size.y, lights.header.size.z);
 
@@ -157,7 +152,6 @@ void PhysicalLayer::loopDrivers() {
 }
 
 void PhysicalLayer::loop20msDrivers() {
-  LayerMappingReadGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
   for (Node* node : nodes) {
     if (node->on) {
