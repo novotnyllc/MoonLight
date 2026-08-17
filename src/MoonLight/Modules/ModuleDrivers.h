@@ -120,6 +120,7 @@ class ModuleDrivers : public NodeManager {
     addNodeValue<SingleRowLayout>(control);
     addNodeValue<SingleColumnLayout>(control);
     addNodeValue<TubesLayout>(control);
+    addNodeValue<WhiteVest95Layout>(control);
 
     // Drivers, Most used first
     addNodeValue<ParallelLEDDriver>(control);
@@ -180,6 +181,7 @@ class ModuleDrivers : public NodeManager {
     if (!node) node = checkAndAlloc<SingleRowLayout>(name);
     if (!node) node = checkAndAlloc<SingleColumnLayout>(name);
     if (!node) node = checkAndAlloc<TubesLayout>(name);
+    if (!node) node = checkAndAlloc<WhiteVest95Layout>(name);
 
     // Drivers most used first
     if (!node) node = checkAndAlloc<ParallelLEDDriver>(name);
@@ -208,6 +210,12 @@ class ModuleDrivers : public NodeManager {
           if (!node && strcmp(boardPreset, BoardName::LightCrafter16) == 0) node = checkAndAlloc<LightCrafter16Layout>(name);
         },
         _moduleName);
+
+    // Migration: the White Vest layout moved from Live Script to native C++.
+    if (!node && equalAZaz09(name, "/L_WhiteVest95.sc")) {
+      strlcpy(name, getNameAndTags<WhiteVest95Layout>().c_str(), 32);
+      node = allocMBObject<WhiteVest95Layout>();
+    }
 
   #if FT_LIVESCRIPT
     if (!node && !safeModeMB) {

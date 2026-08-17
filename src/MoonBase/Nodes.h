@@ -271,6 +271,7 @@ extern SharedData sharedData;
   #include "MoonLight/Nodes/Effects/E_WLED.h"
   #include "MoonLight/Nodes/Effects/E__Sandbox.h"
   #include "MoonLight/Nodes/Layouts/L_MoonLight.h"
+  #include "MoonLight/Nodes/Layouts/L_WhiteVest95.h"
   #include "MoonLight/Nodes/Layouts/L_SE16.h"
   #include "MoonLight/Nodes/Layouts/L__Sandbox.h"
   #include "MoonLight/Nodes/Modifiers/M_MoonLight.h"
