@@ -244,6 +244,7 @@ private:
     FSPersistence<WiFiSettings> _fsPersistence;
     EventSocket *_socket;
     unsigned long _lastConnectionAttempt;
+    unsigned long _connectionStart = 0; // 🌙 start of the current WiFi.begin() attempt
     unsigned long _lastRssiUpdate;
     unsigned long _delayedReconnectTime;
     bool _delayedReconnectPending;
