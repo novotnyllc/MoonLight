@@ -159,6 +159,13 @@ class FastLEDAudioDriver : public Node {
 #ifdef CONFIG_RECOVERY_ENABLED
     if (!on) ConfigRecovery::reportSoundHealthy(false);
 #endif
+    if (!control["on"].isNull()) {
+      if (!on) {
+        stopService();
+      } else if (!audioInput && !boundedPdmActive && pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX && (!safeModeMB || WiFi.isConnected())) {
+        startService();
+      }
+    }
     if (control["name"] == "signalConditioning") {
       audioProcessor.setSignalConditioningEnabled(signalConditioning);
     }
@@ -196,6 +203,10 @@ class FastLEDAudioDriver : public Node {
     if (changed) {
       stopService();
       if (pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX) {
+        if (!on) {
+          updateControl("status", "Stopped");
+          return;
+        }
         if (safeModeMB && !WiFi.isConnected()) {
           updateControl("status", "PDM waiting for WiFi");
           return;
@@ -255,6 +266,9 @@ class FastLEDAudioDriver : public Node {
     } else if (drainBuffer) {
       while (fl::audio::Sample sample = audioInput->read()) {
         samplesCaptured += sample.size();
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::reportSoundHealthy(true);
+#endif
         audioProcessor.update(sample);
       }
 
@@ -262,6 +276,9 @@ class FastLEDAudioDriver : public Node {
       fl::audio::Sample sample = audioInput->read();
       if (sample.isValid()) {
         samplesCaptured += sample.size();
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::reportSoundHealthy(true);
+#endif
         audioProcessor.update(sample);
       }
     }
@@ -334,10 +351,10 @@ class FastLEDAudioDriver : public Node {
   }
 
   void stopService() {
-    if (boundedPdmActive) {
 #ifdef CONFIG_RECOVERY_ENABLED
-      ConfigRecovery::reportSoundHealthy(false);
+    ConfigRecovery::reportSoundHealthy(false);
 #endif
+    if (boundedPdmActive) {
       i2s_channel_disable(pdmRxHandle);
       i2s_del_channel(pdmRxHandle);
       pdmRxHandle = nullptr;
