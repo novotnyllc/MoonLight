@@ -313,6 +313,11 @@ void setup() {
   flockfile(stdout);
   funlockfile(stdout);
 
+  // Force the UART VFS recursive lock to allocate while internal RAM is plentiful.
+  // stdio's own lock above is separate; an mDNS OOM log must not initialize this late.
+  fputc('\n', stdout);
+  fflush(stdout);
+
   for (int i = 0; i < 5; i++) {
     if (!Serial) delay(300);                                      // just a tiny wait to avoid problems later when acessing serial
     if (Serial) Serial.printf("Serial init wait %d\n", i * 300);  // ok-lint: Serial used before logging is initialized
