@@ -8,6 +8,7 @@ constexpr const char* RECOVERY_ROOT = "/.config-recovery";
 constexpr const char* ACTIVE_FILE = "/.config-recovery/active";
 constexpr const char* ACTIVE_TEMP = "/.config-recovery/active.tmp";
 constexpr const char* LAST_ACTION_FILE = "/.config-recovery/last_action";
+constexpr const char* RESTORE_MARKER_FILE = "/.config-recovery/restore_in_progress";
 constexpr uint32_t SCAN_INTERVAL_MS = 60000;
 constexpr uint32_t CONFIRMATION_MS = 10 * 60 * 1000;
 
@@ -218,11 +219,22 @@ bool writeActiveSlot(int slot) {
   return recoveryFs->rename(ACTIVE_TEMP, ACTIVE_FILE);
 }
 
+bool markRestoreInProgress() {
+  if (recoveryFs->exists(RESTORE_MARKER_FILE)) return true;
+  File file = recoveryFs->open(RESTORE_MARKER_FILE, "w");
+  if (!file) return false;
+  bool written = file.print('1') == 1;
+  file.close();
+  return written;
+}
+
 bool restoreSlot(int slot) {
   String source = slotRoot(slot);
+  if (!markRestoreInProgress()) return false;
   if (!removeTree("/.config") || !removeTree("/livescripts")) return false;
   if (!copyTree(source + "/config", "/.config") || !copyTree(source + "/livescripts", "/livescripts")) return false;
-  return fingerprintCurrent() == fingerprintWorkingSet(source);
+  if (fingerprintCurrent() != fingerprintWorkingSet(source)) return false;
+  return recoveryFs->remove(RESTORE_MARKER_FILE);
 }
 
 bool promoteCurrent() {
@@ -262,6 +274,18 @@ void ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
   if (recoveryAvailable && !confirmedFingerprint.valid) {
     activeSlot = -1;
     recoveryAvailable = false;
+  }
+
+  if (recoveryAvailable && recoveryFs->exists(RESTORE_MARKER_FILE)) {
+    ESP_LOGW(TAG, "Resuming interrupted configuration restore from slot %d", activeSlot);
+    if (restoreSlot(activeSlot)) {
+      setLastAction("restored");
+      currentFingerprint = confirmedFingerprint;
+      recoveryPending = false;
+      forceRestorePerformed = true;
+      return;
+    }
+    ESP_LOGE(TAG, "Interrupted configuration restore retry failed; continuing in safe mode");
   }
 
   if (forceRestoreRequested && recoveryAvailable) {

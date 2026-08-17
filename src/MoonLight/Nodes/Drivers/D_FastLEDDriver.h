@@ -209,7 +209,15 @@ class FastLEDDriver : public DriverNode {
     }
 
     else if (control["name"] == "affinity") {
-      switch (control["value"].as<uint8_t>()) {
+      uint8_t requestedAffinity = control["value"].as<uint8_t>();
+      if (pdmForcesRmt) {
+        affinityBeforePdm = requestedAffinity;
+        affinity = 1;
+        updateControl("affinity", affinity);
+        options.mAffinity = "RMT";
+        return;
+      }
+      switch (requestedAffinity) {
       case 0:  // auto
         options.mAffinity = "";
         break;

@@ -55,7 +55,7 @@ esp_err_t PsychicJsonResponse::send()
   }
 
   //send it in one shot or no?
-  if (length < JSON_INTERNAL_CHUNK_SIZE)
+  if (length < buffer_size)
   {
     serializeJson(_root, buffer, buffer_size);
 
