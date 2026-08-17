@@ -13,6 +13,7 @@
  **/
 
 #include <ESP32SvelteKit.h>
+#include <esp_heap_caps.h>
 
 //🌙 added to telemetry
 bool safeModeMB = false; // 🌙 see .h
@@ -111,8 +112,22 @@ void ESP32SvelteKit::begin()
                 response.addHeader("Content-Encoding", "gzip");
                 response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
                 // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
-                response.setContent(content, len);
-                return response.send();
+                constexpr size_t chunkSize = 512;
+                uint8_t *chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                if (!chunk) return httpd_resp_send_err(request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate response buffer.");
+                response.sendHeaders();
+                for (size_t offset = 0; offset < len; offset += chunkSize)
+                {
+                    size_t size = len - offset < chunkSize ? len - offset : chunkSize;
+                    memcpy(chunk, content + offset, size);
+                    esp_err_t err = response.sendChunk(chunk, size);
+                    if (err != ESP_OK) {
+                        heap_caps_free(chunk);
+                        return err;
+                    }
+                }
+                heap_caps_free(chunk);
+                return response.finishChunking();
             };
             PsychicWebHandler *handler = new PsychicWebHandler();
             handler->onRequest(requestHandler);
@@ -153,12 +168,29 @@ void ESP32SvelteKit::begin()
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Credentials", "true");
 #endif
 
-    ESP_LOGV(SVK_TAG, "Starting MDNS");
-    MDNS.begin(getSystemHostname().c_str()); // 🌙 use unified hostname
-    MDNS.setInstanceName(_appName);
-    MDNS.addService("http", "tcp", 80);
-    MDNS.addService("ws", "tcp", 80);
-    MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+    String mdnsHostname = getSystemHostname();
+    mdnsHostname.toLowerCase();
+    if (MDNS.begin(mdnsHostname.c_str()))
+    {
+        MDNS.setInstanceName(mdnsHostname);
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addService("ws", "tcp", 80);
+        MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+        WiFi.onEvent(
+            [](WiFiEvent_t, WiFiEventInfo_t) {
+                esp_netif_t *netif = WiFi.STA.netif();
+                if (netif)
+                {
+                    mdns_netif_action(netif, static_cast<mdns_event_actions_t>(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4));
+                }
+            },
+            WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+        ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
+    }
+    else
+    {
+        ESP_LOGE(SVK_TAG, "mDNS failed to start for %s", mdnsHostname.c_str());
+    }
 
 #ifdef SERIAL_INFO
     Serial.printf("Running Firmware Version: %s\n", APP_VERSION);

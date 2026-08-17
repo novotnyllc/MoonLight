@@ -255,7 +255,11 @@ class ModuleLightsControl : public Module {
             } else if (usage == pin_Button_Push_LightsOn) {
               if (GPIO_IS_VALID_GPIO(gpio)) {
                 pinPushButtonLightsOn = gpio;
+#if CONFIG_IDF_TARGET_ESP32
+                pinMode(pinPushButtonLightsOn, gpio >= 34 && gpio <= 39 ? INPUT : INPUT_PULLUP);
+#else
                 pinMode(pinPushButtonLightsOn, INPUT_PULLUP);
+#endif
                 EXT_LOGD(ML_TAG, "pinPushButtonLightsOn found %d", pinPushButtonLightsOn);
               } else
                 EXT_LOGE(MB_TAG, "gpio %d not valid", pinPushButtonLightsOn);

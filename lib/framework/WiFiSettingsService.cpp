@@ -277,6 +277,17 @@ bool sendAnalytics() {
 void WiFiSettingsService::loop()
 {
     unsigned long currentMillis = millis();
+    static unsigned long lastMdnsAnnounce = 0;
+
+    if (WiFi.isConnected() && (unsigned long)(currentMillis - lastMdnsAnnounce) >= 60000UL)
+    {
+        lastMdnsAnnounce = currentMillis;
+        esp_netif_t *netif = WiFi.STA.netif();
+        if (netif)
+        {
+            mdns_netif_action(netif, static_cast<mdns_event_actions_t>(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4));
+        }
+    }
 
     // Handle delayed reconnection
     if (_delayedReconnectPending && currentMillis >= _delayedReconnectTime)

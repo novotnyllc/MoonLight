@@ -44,6 +44,8 @@ class FastLEDDriver : public DriverNode {
   #endif
     addControl(engine, "engine", "text", 0, 32, true);  // the resolved engine based on affinity
 
+    reserveRmtForPdm();
+
     addControl(temperature, "temperature", "select");
     addControlValue("Uncorrected");
     addControlValue("Candle");
@@ -61,6 +63,7 @@ class FastLEDDriver : public DriverNode {
     addControl(status, "status", "text", 0, 32, true);
 
     ioUpdateHandler = moduleIO->addUpdateHandler([this](const String& originId) {
+      reserveRmtForPdm();
       uint8_t nrOfPins = MIN(layerP.nrOfLedPins, layerP.nrOfAssignedPins);
 
       EXT_LOGD(ML_TAG, "recreate channels and configs %s %d", originId.c_str(), nrOfPins);
@@ -91,6 +94,23 @@ class FastLEDDriver : public DriverNode {
 
   fl::EOrder rgbOrder = GRB;
   fl::ChannelOptions options = fl::ChannelOptions();
+
+  void reserveRmtForPdm() {
+    bool hasPdmData = false;
+    bool hasPdmClock = false;
+    moduleIO->read([&](ModuleState& state) {
+      for (JsonObject pinObject : state.data["pins"].as<JsonArray>()) {
+        uint8_t usage = pinObject["usage"];
+        hasPdmData = hasPdmData || usage == pin_I2S_SD;
+        hasPdmClock = hasPdmClock || usage == pin_I2S_WS;
+      }
+    }, "FastLEDDriver");
+    if (hasPdmData && hasPdmClock) {
+      affinity = 1;
+      updateControl("affinity", affinity);
+      options.mAffinity = "RMT";
+    }
+  }
 
   void onUpdate(const JsonObject& control) override {
     DriverNode::onUpdate(control);  // !!
