@@ -14,6 +14,7 @@
 #if FT_MOONLIGHT
 
   #include <vector>
+  #include <atomic>
 
   #include "FastLED.h"
   #include "LayerMappingMutex.h"
@@ -50,8 +51,8 @@ class PhysicalLayer {
   // pass 1 so the virtual mapping table stays in sync with the physical layout.
   // Callers should set requestMapPhysical when the physical light count or
   // positions change, and requestMapVirtual alone when only modifiers change.
-  uint8_t requestMapPhysical = false;
-  uint8_t requestMapVirtual = false;
+  std::atomic<bool> requestMapPhysical{false};
+  std::atomic<bool> requestMapVirtual{false};
 
   // Driver/layout/modifier nodes attached directly to this physical layer.
   std::vector<Node*, VectorRAMAllocator<Node*>> nodes;

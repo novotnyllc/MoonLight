@@ -289,6 +289,13 @@ TEST_CASE("layer views reject missing slots and layer iteration survives holes")
   CHECK_EQ(visited[1], 3);
 }
 
+TEST_CASE("channel selections enforce grouped pixel and ungrouped channel bounds") {
+  CHECK(channelSelectionInBounds(true, 94, 95, 285));
+  CHECK_FALSE(channelSelectionInBounds(true, 95, 95, 285));
+  CHECK(channelSelectionInBounds(false, 284, 95, 285));
+  CHECK_FALSE(channelSelectionInBounds(false, 285, 95, 285));
+}
+
 // ============================================================
 // Char<N> tests (included directly from Char.h — no copy!)
 // ============================================================

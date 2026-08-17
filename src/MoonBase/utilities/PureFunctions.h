@@ -146,6 +146,10 @@ inline bool usableLayerView(uint8_t view, size_t slotCount, bool selectedSlotPre
   return view == 0 || (static_cast<size_t>(view - 1) < slotCount && selectedSlotPresent);
 }
 
+inline bool channelSelectionInBounds(bool grouped, uint32_t selected, uint32_t lightCount, uint32_t channelCount) {
+  return grouped ? selected < lightCount : selected < channelCount;
+}
+
 template <typename Container, typename Callback>
 inline void forEachPresentPointer(Container& slots, Callback&& callback) {
   for (auto* slot : slots) {

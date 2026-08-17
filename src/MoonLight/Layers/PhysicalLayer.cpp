@@ -70,7 +70,7 @@ void PhysicalLayer::setup() {
 }
 
 void PhysicalLayer::loop() {
-  LayerMappingGuard guard(mappingMutex);
+  LayerMappingReadGuard guard(mappingMutex);
   if (!lights.channelsD || lights.header.nrOfChannels == 0) return;  // no layout yet or alloc failed
 
   // Effects write to per-layer virtualChannels; channelsD is zeroed and composited
@@ -93,7 +93,7 @@ void PhysicalLayer::loop() {
 }
 
 void PhysicalLayer::compositeLayers() {
-  LayerMappingGuard guard(mappingMutex);
+  LayerMappingReadGuard guard(mappingMutex);
   if (!lights.channelsD || lights.header.nrOfChannels == 0) return;  // no layout yet or alloc failed
 
   // Zero channelsD so additive layer blending starts from black each frame
@@ -106,37 +106,35 @@ void PhysicalLayer::compositeLayers() {
 }
 
 void PhysicalLayer::loop20ms() {
-  LayerMappingGuard guard(mappingMutex);
+  LayerMappingReadGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
   forEachPresentPointer(layers, [](VirtualLayer* layer) { layer->loop20ms(); });
 }
 
 void PhysicalLayer::loopDrivers() {
-  LayerMappingGuard guard(mappingMutex);
-  // run mapping in the drivers task
+  // Remap/topology mutation remains exclusive, but ordinary driver dispatch is
+  // read-side lifetime use and can overlap the effect task.
+  if (requestMapPhysical.load() || requestMapVirtual.load()) {
+    LayerMappingGuard mappingGuard(mappingMutex);
+    if (requestMapPhysical.load()) {
+      EXT_LOGD(ML_TAG, "mapLayout physical requested");
+      pass = 1;
+      mapLayout();
+      requestMapPhysical.store(false);
+      requestMapVirtual.store(true);  // pass 2 must follow pass 1
+    }
 
-  if (requestMapPhysical) {
-    EXT_LOGD(ML_TAG, "mapLayout physical requested");
-
-    pass = 1;
-    mapLayout();
-
-    requestMapPhysical = false;
-    requestMapVirtual = true;  // pass 2 must always follow pass 1 so the virtual mapping table reflects the new physical layout
+    if (requestMapVirtual.load()) {
+      // Pass 2 writes to channelsD after monitor consumes pass-1 positions.
+      if (lights.header.isPositions == 2) return;
+      EXT_LOGD(ML_TAG, "mapLayout virtual requested");
+      pass = 2;
+      mapLayout();
+      requestMapVirtual.store(false);
+    }
   }
 
-  if (requestMapVirtual) {
-    // wait until monitor has consumed the positions from pass 1 before running pass 2,
-    // because pass 2 writes to channelsD which pass 1 used to store position data
-    if (lights.header.isPositions == 2) return;  // will retry next loopDrivers() iteration
-
-    EXT_LOGD(ML_TAG, "mapLayout virtual requested");
-
-    pass = 2;
-    mapLayout();
-
-    requestMapVirtual = false;
-  }
+  LayerMappingReadGuard guard(mappingMutex);
 
   // for physical layer nodes
   if (prevSize != lights.header.size) EXT_LOGD(ML_TAG, "onSizeChanged P %d,%d,%d -> %d,%d,%d", prevSize.x, prevSize.y, prevSize.z, lights.header.size.x, lights.header.size.y, lights.header.size.z);
@@ -159,7 +157,7 @@ void PhysicalLayer::loopDrivers() {
 }
 
 void PhysicalLayer::loop20msDrivers() {
-  LayerMappingGuard guard(mappingMutex);
+  LayerMappingReadGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
   for (Node* node : nodes) {
     if (node->on) {

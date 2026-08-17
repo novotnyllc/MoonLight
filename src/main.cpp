@@ -178,7 +178,7 @@ TaskHandle_t driverTaskHandle = nullptr;
       xSemaphoreTake(channelsDFreeSemaphore, portMAX_DELAY);
       {
         // Global lifetime lock order: mapping -> node task mutex -> swap.
-        LayerMappingGuard mappingGuard(layerP.mappingMutex);
+        LayerMappingReadGuard mappingGuard(layerP.mappingMutex);
         xSemaphoreTake(swapMutex, portMAX_DELAY);
         if (layerP.lights.header.isPositions == 0) {  // check if layout didn't start while we were unlocked
           layerP.compositeLayers();  // zero channelsD + composite all virtualChannels into it

@@ -135,7 +135,7 @@ TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
   std::promise<void> releaseReader;
   std::shared_future<void> releaseFuture(releaseReader.get_future());
   std::thread reader([&]() {
-    LayerMappingGuard guard(layerP.mappingMutex);
+    LayerMappingReadGuard guard(layerP.mappingMutex);
     readerLocked.set_value();
     releaseFuture.wait();
   });
@@ -157,23 +157,57 @@ TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
   CHECK(layerP.layers[1] == nullptr);
 }
 
-TEST_CASE("mapping-before-node-before-swap ordering completes under interleaving") {
+TEST_CASE("shared lifetime readers overlap while writer waits and excludes new readers") {
   layerP.reset();
-  std::mutex nodeMutex;
-  std::mutex swapMutex;
+  std::atomic<int> activeReaders{0};
+  std::atomic<bool> deleted{false};
+  std::promise<void> releaseReaders;
+  std::shared_future<void> releaseReadersFuture(releaseReaders.get_future());
 
-  auto driver = std::async(std::launch::async, [&]() {
-    LayerMappingGuard mapping(layerP.mappingMutex);
-    std::lock_guard<std::mutex> node(nodeMutex);
-    std::lock_guard<std::mutex> swap(swapMutex);
-  });
-  auto compositor = std::async(std::launch::async, [&]() {
-    LayerMappingGuard mapping(layerP.mappingMutex);
-    std::lock_guard<std::mutex> swap(swapMutex);
-  });
+  auto readerBody = [&]() {
+    LayerMappingReadGuard guard(layerP.mappingMutex);
+    CHECK_FALSE(deleted.load());
+    activeReaders.fetch_add(1);
+    releaseReadersFuture.wait();
+    activeReaders.fetch_sub(1);
+  };
+  auto reader1 = std::async(std::launch::async, readerBody);
+  auto reader2 = std::async(std::launch::async, readerBody);
+  while (activeReaders.load() != 2) std::this_thread::yield();
+  CHECK_EQ(activeReaders.load(), 2);
 
-  CHECK(driver.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
-  CHECK(compositor.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  std::promise<void> writerEntered;
+  std::future<void> writerEnteredFuture = writerEntered.get_future();
+  std::promise<void> releaseWriter;
+  std::shared_future<void> releaseWriterFuture(releaseWriter.get_future());
+  auto writer = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    deleted.store(true);
+    writerEntered.set_value();
+    releaseWriterFuture.wait();
+  });
+  while (layerP.mappingMutex.waitingWriterCountForTest() == 0) std::this_thread::yield();
+
+  std::promise<void> lateReaderEntered;
+  auto lateReader = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard guard(layerP.mappingMutex);
+    lateReaderEntered.set_value();
+    CHECK(deleted.load());
+  });
+  auto lateReaderFuture = lateReaderEntered.get_future();
+  CHECK(lateReaderFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  CHECK(writerEnteredFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+  releaseReaders.set_value();
+  CHECK(writerEnteredFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(lateReaderFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  releaseWriter.set_value();
+
+  CHECK(lateReaderFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  reader1.get();
+  reader2.get();
+  writer.get();
+  lateReader.get();
 }
 
 // ---------------------------------------------------------------------------
