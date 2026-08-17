@@ -75,6 +75,8 @@ enum IO_PinUsageEnum {
   pin_Exposed,
   pin_Reserved,
   pin_PIR,  // support for PIR (passive infrared) sensor
+  pin_DigNext2_Button1,
+  pin_DigNext2_Button2,
   pin_count
 };
 
@@ -210,6 +212,8 @@ class ModuleIO : public Module {
       addControlValue(control, "Exposed");
       addControlValue(control, "Reserved");
       addControlValue(control, "PIR ♨️");
+      addControlValue(control, "Dig-Next-2 Button_1");
+      addControlValue(control, "Dig-Next-2 Button_2");
 
       control = addControl(rows, "index", "number", 1, 32);  // max 32 of one type, e.g 32 led pins
       control["default"] = UINT8_MAX;
@@ -450,8 +454,8 @@ class ModuleIO : public Module {
       // pinAssigner.assignPin(?, pin_I2S_SCK);
       pinAssigner.assignPin(15, pin_I2C_SDA);
       pinAssigner.assignPin(14, pin_I2C_SCL);
-      pinAssigner.assignPin(34, pin_Button_Push_LightsOn);
-      pinAssigner.assignPin(35, pin_ButtonPush);
+      pinAssigner.assignPin(34, pin_DigNext2_Button1);
+      pinAssigner.assignPin(35, pin_DigNext2_Button2);
       pinAssigner.assignPin(0, pin_Exposed);
       pinAssigner.assignPin(25, pin_Exposed);
       pinAssigner.assignPin(32, pin_Exposed);
