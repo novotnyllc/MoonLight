@@ -36,6 +36,7 @@ bool recoverySoundRequired = false;
 bool recoverySoundHealthy = false;
 bool forceRestoreRequested = false;
 bool forceRestorePerformed = false;
+bool candidateHealthy = false;
 uint32_t candidateSince = 0;
 uint32_t lastScan = 0;
 Fingerprint confirmedFingerprint;
@@ -311,12 +312,21 @@ void ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
   }
 
   recoveryPending = !recoveryAvailable || currentFingerprint != confirmedFingerprint;
+  candidateHealthy = false;
   candidateSince = millis();
   lastScan = millis();
 }
 
 void ConfigRecovery::loop(bool healthy) {
   uint32_t now = millis();
+  bool healthyForConfirmation = healthy && (!recoverySoundRequired || recoverySoundHealthy);
+  if (!healthyForConfirmation) {
+    candidateHealthy = false;
+    candidateSince = now;
+  } else if (!candidateHealthy) {
+    candidateHealthy = true;
+    candidateSince = now;
+  }
   if ((uint32_t)(now - lastScan) < SCAN_INTERVAL_MS) return;
   lastScan = now;
 
@@ -328,7 +338,7 @@ void ConfigRecovery::loop(bool healthy) {
   }
 
   recoveryPending = !recoveryAvailable || currentFingerprint != confirmedFingerprint;
-  if (recoveryPending && healthy && (!recoverySoundRequired || recoverySoundHealthy) && (uint32_t)(now - candidateSince) >= CONFIRMATION_MS) {
+  if (recoveryPending && candidateHealthy && (uint32_t)(now - candidateSince) >= CONFIRMATION_MS) {
     promoteCurrent();
   }
 }
