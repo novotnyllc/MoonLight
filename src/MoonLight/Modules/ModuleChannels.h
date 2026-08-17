@@ -22,6 +22,7 @@ class ModuleChannels : public Module {
   ModuleChannels(PsychicHttpServer* server, ESP32SvelteKit* sveltekit) : Module("channels", server, sveltekit) { EXT_LOGV(ML_TAG, "constructor"); }
 
   void setupDefinition(const JsonArray& controls) override {
+    LayerMappingGuard guard(layerP.mappingMutex);
     EXT_LOGV(ML_TAG, "");
 
     JsonObject control;  // state.data has one or more properties
@@ -54,6 +55,7 @@ class ModuleChannels : public Module {
   }
 
   void onUpdate(const UpdatedItem& updatedItem) override {
+    LayerMappingGuard guard(layerP.mappingMutex);
     uint8_t view = _state.data["view"];
     bool group = _state.data["group"];
 

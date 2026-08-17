@@ -48,6 +48,7 @@ PhysicalLayer::~PhysicalLayer() {
 }
 
 VirtualLayer* PhysicalLayer::ensureLayer(uint8_t index) {
+  LayerMappingGuard guard(mappingMutex);
   if (index >= layers.size()) return nullptr;
   if (!layers[index]) {
     layers[index] = new VirtualLayer();
@@ -60,6 +61,7 @@ VirtualLayer* PhysicalLayer::ensureLayer(uint8_t index) {
 }
 
 void PhysicalLayer::setup() {
+  LayerMappingGuard guard(mappingMutex);
   // channelsD is allocated lazily in addLight() during pass 1 as lights are added (doubling strategy).
   // It is shrunk to nrOfChannels at the end of pass 1.  OOM is handled by realloc returning nullptr.
   for (VirtualLayer* layer : layers) {
@@ -68,6 +70,7 @@ void PhysicalLayer::setup() {
 }
 
 void PhysicalLayer::loop() {
+  LayerMappingGuard guard(mappingMutex);
   if (!lights.channelsD || lights.header.nrOfChannels == 0) return;  // no layout yet or alloc failed
 
   // Effects write to per-layer virtualChannels; channelsD is zeroed and composited
@@ -93,6 +96,7 @@ void PhysicalLayer::loop() {
 }
 
 void PhysicalLayer::compositeLayers() {
+  LayerMappingGuard guard(mappingMutex);
   if (!lights.channelsD || lights.header.nrOfChannels == 0) return;  // no layout yet or alloc failed
 
   // Zero channelsD so additive layer blending starts from black each frame
@@ -105,6 +109,7 @@ void PhysicalLayer::compositeLayers() {
 }
 
 void PhysicalLayer::loop20ms() {
+  LayerMappingGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
   for (uint8_t i = 0; i < activeLayerCount && i < layers.size(); i++) {
     VirtualLayer* layer = layers[i];
@@ -126,6 +131,7 @@ void PhysicalLayer::loopDrivers() {
   }
 
   if (requestMapVirtual) {
+    LayerMappingGuard guard(mappingMutex);
     // wait until monitor has consumed the positions from pass 1 before running pass 2,
     // because pass 2 writes to channelsD which pass 1 used to store position data
     if (lights.header.isPositions == 2) return;  // will retry next loopDrivers() iteration

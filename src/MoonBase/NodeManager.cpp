@@ -104,6 +104,7 @@ void NodeManager::setupDefinition(const JsonArray& controls) {
 }
 
 void NodeManager::onUpdate(const UpdatedItem& updatedItem) {
+  LayerMappingGuard guard(layerP.mappingMutex);
   // handle nodes
   if (updatedItem.parent[0] == "nodes") {  // onNodes
     JsonVariant nodeState = _state.data["nodes"][updatedItem.index[0]];
@@ -270,6 +271,7 @@ void NodeManager::handleNodeControlValueChange(const UpdatedItem& updatedItem, J
 }
 
 void NodeManager::onReOrderSwap(uint8_t stateIndex, uint8_t newIndex) {
+  LayerMappingGuard guard(layerP.mappingMutex);
   EXT_LOGD(MB_TAG, "%d %d %d", nodes->size(), stateIndex, newIndex);
   // swap nodes
   Node* nodeS = (*nodes)[stateIndex];

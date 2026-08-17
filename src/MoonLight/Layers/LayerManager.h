@@ -18,12 +18,12 @@
 
   #include <ArduinoJson.h>
   #include "MoonBase/utilities/Char.h"
+  #include "LayerMappingMutex.h"
 
   #ifdef ARDUINO
     #include "MoonBase/Module.h"
     #include "MoonBase/NodeManager.h"
     #include "PhysicalLayer.h"
-    extern TaskHandle_t effectTaskHandle;
   #endif
 
   /// Copy data["nodes"] → data["nodes_<layer>"]. Called when leaving a layer.
@@ -76,6 +76,7 @@ class LayerManager {
 
   /// Switch the active layer, swapping per-layer JSON state (nodes, start/end/brightness).
   void selectLayer(uint8_t index, bool swapState = true) {
+    LayerMappingGuard guard(layerP.mappingMutex);
     if (index >= layerP.layers.size()) return;
 
     if (swapState && !state->data["nodes"].isNull()) {
@@ -110,13 +111,7 @@ class LayerManager {
   /// Destroys all non-selected VirtualLayers and clears their state keys so that compareRecursive
   /// sees a clean slate and restoreNonSelectedLayers can rebuild from the new preset.
   void prepareForPresetLoad() {
-    // Suspend the effectTask while deleting VirtualLayer objects to prevent a
-    // use-after-free: effectTask iterates layerP.layers without a lock, so it must
-    // not run while we delete and null out entries.  vTaskSuspend/Resume costs zero
-    // extra bytes (no new FreeRTOS object) and effectTask holds no mutex during loop().
-    #ifdef ARDUINO
-    vTaskSuspend(effectTaskHandle);
-    #endif
+    LayerMappingGuard guard(layerP.mappingMutex);
     for (uint8_t i = 1; i < layerP.layers.size(); i++) {
       if (!layerP.layers[i]) continue;
 
@@ -128,10 +123,6 @@ class LayerManager {
       // clear per-layer JSON state so compareRecursive treats these keys as absent
       layerStateClearKeys(state->data, i);
     }
-    #ifdef ARDUINO
-    vTaskResume(effectTaskHandle);
-    #endif
-
     // if the selected layer was > 0 (unlikely but safe), fall back to layer 0
     if (selectedLayer > 0) {
       selectLayer(0, false);
@@ -171,19 +162,13 @@ class LayerManager {
 
   /// Called after a node is removed. If the current layer is empty, destroy it and switch to layer 0.
   void onNodeRemoved() {
+    LayerMappingGuard guard(layerP.mappingMutex);
     if (selectedLayer > 0 && layerP.layers[selectedLayer] && layerP.layers[selectedLayer]->nodes.empty()) {
       uint8_t destroyedLayer = selectedLayer;
       EXT_LOGD(ML_TAG, "Destroying empty VirtualLayer %d", destroyedLayer);
-      #ifdef ARDUINO
-      vTaskSuspend(effectTaskHandle);
-      #endif
       delete layerP.layers[destroyedLayer];
       layerP.layers[destroyedLayer] = nullptr;
       layerP.activeLayerCount--;
-      #ifdef ARDUINO
-      vTaskResume(effectTaskHandle);
-      #endif
-
       // clean up JSON state for the destroyed layer
       layerStateClearKeys(state->data, destroyedLayer);
 
@@ -220,6 +205,7 @@ class LayerManager {
   /// Handle layer-related onUpdate events. Returns true if the event was consumed.
   bool handleUpdate(const UpdatedItem& updatedItem) {
     if (updatedItem.parent[0] != "") return false;
+    LayerMappingGuard guard(layerP.mappingMutex);
 
     if (updatedItem.name == "layer") {
       selectLayer(updatedItem.value.as<uint8_t>());
@@ -270,6 +256,7 @@ class LayerManager {
   /// Install a readHook on the module state that injects per-layer bounds into the JSON sent to the UI.
   void installReadHook() {
     state->readHook = [this](JsonObject data) {
+      LayerMappingGuard guard(layerP.mappingMutex);
       VirtualLayer* layer = layerP.ensureLayer(selectedLayer);
       if (!layer) return;
       data["start"]["x"] = layer->startPct.x;
@@ -285,6 +272,7 @@ class LayerManager {
   /// Add layer selection dropdown and per-layer bound controls to setupDefinition.
   #ifdef ARDUINO // Because addLayerControls takes a Module& parameter, and Module is only defined when #include "MoonBase/Module.h" is processed — which is guarded by #ifdef ARDUINO. Without the method-level guard, native compilation fails with "unknown type name 'Module'". It's a consequence of the include guard, not a deliberate design choice. It's not testable anyway (it's pure UI setup), so the guard is harmless. If you'd prefer to avoid it, the alternative is to add a Module stub to the test stubs — but Module is complex enough that guarding the one method is simpler.
   static void addLayerControls(Module& module, const JsonArray& controls) {
+    LayerMappingGuard guard(layerP.mappingMutex);
     JsonObject control = module.addControl(controls, "layer", "select");
     control["default"] = 0;
     // Find highest active index so that a "add new" slot always appears beyond it,
@@ -311,6 +299,7 @@ class LayerManager {
  private:
   /// Instantiate nodes for non-selected layers and restore their per-layer bounds from JSON state.
   void restoreNonSelectedLayers(NodeManager& nm) {
+    LayerMappingGuard guard(layerP.mappingMutex);
     uint8_t savedSelectedLayer = selectedLayer;
     Char<16> key;
     bool restoredAny = false;
@@ -330,15 +319,6 @@ class LayerManager {
       EXT_LOGD(ML_TAG, "Migrated old-format state: reset layer %d bounds to defaults", savedSelectedLayer);
     }
 
-    // Suspend effectTask while adding nodes to non-selected layers: ensureLayer() makes the
-    // layer non-null in layerP.layers immediately, so Core 0 would see it and iterate
-    // layer->nodes via VirtualLayer::loop() concurrently with our push_back calls here.
-    // A push_back that triggers reallocation while Core 0 holds an iterator is a use-after-free.
-    // effectTask holds no mutex during loop(), so suspend/resume is safe (same pattern as
-    // prepareForPresetLoad and onNodeRemoved).
-    #ifdef ARDUINO
-    vTaskSuspend(effectTaskHandle);
-    #endif
     for (uint8_t i = 0; i < layerP.layers.size(); i++) {
       if (i == savedSelectedLayer) continue;
 
@@ -382,10 +362,6 @@ class LayerManager {
                layer->endPct.x, layer->endPct.y, layer->endPct.z, layer->brightness);
       restoredAny = true;
     }
-    #ifdef ARDUINO
-    vTaskResume(effectTaskHandle);
-    #endif
-
     selectedLayer = savedSelectedLayer;
     VirtualLayer* layer = layerP.layers[selectedLayer];
     if (layer) *nodesPtr = &(layer->nodes);

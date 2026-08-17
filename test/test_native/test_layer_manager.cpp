@@ -21,9 +21,14 @@
 // ---------------------------------------------------------------------------
 
 #include <ArduinoJson.h>
+#include <chrono>
 #include <functional>
+#include <future>
+#include <thread>
 #include <vector>
 #include <cstring>
+
+#include "MoonLight/Layers/LayerMappingMutex.h"
 
 // Logging macros — no-ops in native tests
 #ifndef EXT_LOGD
@@ -68,6 +73,7 @@ struct PhysicalLayer {
   std::vector<VirtualLayer*> layers;
   int activeLayerCount = 0;
   bool requestMapVirtual = false;
+  LayerMappingMutex mappingMutex;
 
   PhysicalLayer() {
     layers.resize(8, nullptr);
@@ -114,6 +120,42 @@ struct ModuleState {
 // #ifdef ARDUINO blocks are skipped, stubs above supply the missing types)
 // ---------------------------------------------------------------------------
 #include "MoonLight/Layers/LayerManager.h"
+
+TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
+  layerP.reset();
+  VirtualLayer* layer1 = layerP.ensureLayer(1);
+
+  ModuleState state;
+  std::vector<Node*, VectorRAMAllocator<Node*>>* selectedNodes = &layerP.layers[0]->nodes;
+  bool requestUIUpdate = false;
+  LayerManager manager;
+  manager.init(state, selectedNodes, requestUIUpdate);
+
+  std::promise<void> readerLocked;
+  std::promise<void> releaseReader;
+  std::shared_future<void> releaseFuture(releaseReader.get_future());
+  std::thread reader([&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    readerLocked.set_value();
+    releaseFuture.wait();
+  });
+  readerLocked.get_future().wait();
+
+  std::promise<void> reconfigured;
+  std::future<void> reconfiguredFuture = reconfigured.get_future();
+  std::thread writer([&]() {
+    manager.prepareForPresetLoad();
+    reconfigured.set_value();
+  });
+
+  CHECK(reconfiguredFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  CHECK(layerP.layers[1] == layer1);
+
+  releaseReader.set_value();
+  reader.join();
+  writer.join();
+  CHECK(layerP.layers[1] == nullptr);
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers

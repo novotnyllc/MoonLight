@@ -16,6 +16,7 @@
   #include <vector>
 
   #include "FastLED.h"
+  #include "LayerMappingMutex.h"
   #include "MoonBase/utilities/PlatformFunctions.h"
   #include "LightsHeader.h"  // pure types: nrOfLights_t, LightsHeader, Lights — no ESP32 deps
 
@@ -64,6 +65,10 @@ class PhysicalLayer {
   // Mutexes protecting the effects and drivers task respectively.
   SemaphoreHandle_t effectsMutex = xSemaphoreCreateMutex();
   SemaphoreHandle_t driversMutex = xSemaphoreCreateMutex();
+
+  // Owns VirtualLayer topology and mapping/virtual-channel buffer lifetimes.
+  // Recursive because LayerManager operations call ensureLayer() while already holding it.
+  LayerMappingMutex mappingMutex;
 
   PhysicalLayer();
   ~PhysicalLayer();
