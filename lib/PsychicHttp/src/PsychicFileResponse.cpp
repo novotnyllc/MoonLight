@@ -110,8 +110,7 @@ esp_err_t PsychicFileResponse::send()
     if (buffer == NULL)
     {
       /* Respond with 500 Internal Server Error */
-      httpd_resp_send_err(this->_request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate memory.");
-      return ESP_FAIL;
+      return sendServiceUnavailable(this->_request);
     }
 
     size_t readSize = _content.readBytes((char *)buffer, size);
@@ -124,12 +123,16 @@ esp_err_t PsychicFileResponse::send()
   else
   {
     /* Retrieve the pointer to scratch buffer for temporary storage */
-    char *chunk = static_cast<char *>(heap_caps_malloc(FILE_INTERNAL_CHUNK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    size_t chunkSize = FILE_INTERNAL_CHUNK_SIZE;
+    char *chunk = static_cast<char *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (chunk == NULL)
     {
-      /* Respond with 500 Internal Server Error */
-      httpd_resp_send_err(this->_request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate memory.");
-      return ESP_FAIL;
+      chunkSize = 256;
+      chunk = static_cast<char *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (chunk == NULL)
+    {
+      return sendServiceUnavailable(this->_request);
     }
 
     this->sendHeaders();
@@ -137,7 +140,7 @@ esp_err_t PsychicFileResponse::send()
     size_t chunksize;
     do {
         /* Read file in chunks into the scratch buffer */
-        chunksize = _content.readBytes(chunk, FILE_INTERNAL_CHUNK_SIZE);
+        chunksize = _content.readBytes(chunk, chunkSize);
         if (chunksize > 0)
         {
           err = this->sendChunk((uint8_t *)chunk, chunksize);

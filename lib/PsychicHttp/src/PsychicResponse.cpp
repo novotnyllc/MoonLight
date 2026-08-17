@@ -162,3 +162,12 @@ esp_err_t PsychicResponse::finishChunking()
   /* Respond with an empty chunk to signal HTTP response completion */
   return httpd_resp_send_chunk(this->_request->request(), NULL, 0);
 }
+
+esp_err_t PsychicResponse::sendServiceUnavailable(PsychicRequest *request)
+{
+  httpd_req_t *req = request->request();
+  httpd_resp_set_status(req, "503 Service Unavailable");
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_set_hdr(req, "Retry-After", "1");
+  return httpd_resp_send(req, "Server busy; retry shortly.", HTTPD_RESP_USE_STRLEN);
+}

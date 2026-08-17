@@ -41,6 +41,7 @@ class PsychicResponse
     void sendHeaders();
     esp_err_t sendChunk(uint8_t *chunk, size_t chunksize);
     esp_err_t finishChunking();
+    static esp_err_t sendServiceUnavailable(PsychicRequest *request);
 };
 
 #endif // PsychicResponse_h
