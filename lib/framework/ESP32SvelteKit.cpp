@@ -199,8 +199,8 @@ bool ESP32SvelteKit::begin()
             esp_netif_t *netif = WiFi.STA.netif();
             if (netif)
             {
-                if (mdns_netif_action(netif, MDNS_EVENT_ENABLE_IP4) == ESP_OK)
-                    mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
+                maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
+                                [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
             }
         };
         registerMdnsStaGotIp(

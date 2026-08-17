@@ -7,3 +7,9 @@ inline void registerMdnsStaGotIp(RegisterHandler registerHandler, IsConnected is
     if (isConnected())
         announce();
 }
+
+template <typename EventAction, typename Send>
+inline void maintainMdnsIp4(EventAction enable, EventAction announce, Send send)
+{
+    send(static_cast<EventAction>(enable | announce));
+}

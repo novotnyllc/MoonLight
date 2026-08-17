@@ -15,6 +15,7 @@
 #include <WiFiSettingsService.h>
 
 #include <ESP32SvelteKit.h> // 🌙 safeMode
+#include <MdnsRegistrationPolicy.h>
 #if FT_ENABLED(FT_ETHERNET)
 #include <ETH.h> // 🌙 ETH.connected() check in manageSTA()
 #endif
@@ -285,7 +286,8 @@ void WiFiSettingsService::loop()
         esp_netif_t *netif = WiFi.STA.netif();
         if (netif)
         {
-            mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
+            maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
+                            [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
         }
     }
 

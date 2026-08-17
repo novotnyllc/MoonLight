@@ -41,6 +41,21 @@ TEST_CASE("late mDNS registration announces immediately and keeps GOT_IP handler
   CHECK_EQ(announcements, 2);
 }
 
+TEST_CASE("mDNS maintenance queues enable and announce atomically") {
+  constexpr unsigned enableIp4 = 1U << 0;
+  constexpr unsigned announceIp4 = 1U << 1;
+  int sends = 0;
+  unsigned action = 0;
+
+  maintainMdnsIp4(enableIp4, announceIp4, [&](unsigned value) {
+    ++sends;
+    action = value;
+  });
+
+  CHECK_EQ(sends, 1);
+  CHECK_EQ(action, enableIp4 | announceIp4);
+}
+
 TEST_CASE("gcd") {
   CHECK_EQ(gcd(12, 18), 6);
   CHECK_EQ(gcd(7, 13), 1);
