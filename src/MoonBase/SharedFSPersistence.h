@@ -14,7 +14,6 @@
 
 #include <FS.h>
 #include <StatefulService.h>
-#include <esp_system.h>
 
 #include "Module.h"
 
@@ -99,16 +98,7 @@ class SharedFSPersistence {
 
     ModuleInfo& info = it->second;
     if (!info.module->shouldLoadPersistedState()) {
-      if (_fs->exists(info.filePath)) {
-        String recoveryPath = String("/.config/") + moduleName + ".recovery-" + String(esp_random(), HEX) + ".json";
-        if (_fs->rename(info.filePath, recoveryPath))
-          EXT_LOGW(MB_TAG, "Quarantined %s as %s", info.filePath.c_str(), recoveryPath.c_str());
-        else {
-          EXT_LOGE(MB_TAG, "Failed to quarantine %s", info.filePath.c_str());
-          return;
-        }
-      }
-      if (!writeToFSNow(moduleName)) EXT_LOGE(MB_TAG, "Failed to write safe defaults for %s", moduleName);
+      EXT_LOGW(MB_TAG, "Using in-memory defaults for %s; leaving %s unchanged", moduleName, info.filePath.c_str());
       return;
     }
     File file = _fs->open(info.filePath.c_str(), "r");
@@ -135,6 +125,7 @@ class SharedFSPersistence {
     if (it == _modules.end()) return;
 
     ModuleInfo& info = it->second;
+    if (!info.module->shouldLoadPersistedState()) return;
 
     // ADDED: Delayed write support
     if (info.delayedWriting) {
@@ -172,6 +163,7 @@ class SharedFSPersistence {
     if (it == _modules.end()) return false;
 
     ModuleInfo& info = it->second;
+    if (!info.module->shouldLoadPersistedState()) return true;
 
     // ADDED: Create directories if needed
     mkdirs(info.filePath);

@@ -96,8 +96,8 @@ class Module : public StatefulService<ModuleState> {
   // any Module that overrides begin() must continue to call Module::begin() (e.g., at the start of its own begin()
   virtual void begin();
 
-  /// Return false to keep the module's in-memory defaults instead of loading
-  /// its persisted file (for example, a safe-mode recovery fallback).
+  /// Return false to keep the module's in-memory defaults while leaving its
+  /// persisted file unchanged and read-only (for example, in safe mode).
   virtual bool shouldLoadPersistedState() const { return true; }
 
   /// Called every SvelteKit loop iteration (fastest). Override for high-frequency polling.
