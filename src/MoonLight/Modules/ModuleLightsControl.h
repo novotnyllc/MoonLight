@@ -573,13 +573,6 @@ class ModuleLightsControl : public Module {
   void requestPreset(int select) {
     if (select < 0) return;
 
-    _fileManager->update(
-        [&](FilesState& state) {
-          state.updatedItems.push_back("/.config/effects.json");
-          return StateUpdateResult::CHANGED;
-        },
-        _moduleName);
-
     JsonDocument doc;
     JsonObject newState = doc.to<JsonObject>();
     newState["preset"] = _state.data["preset"];
