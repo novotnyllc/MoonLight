@@ -14,6 +14,7 @@
 
 #include <ESP32SvelteKit.h>
 #include <ConfigRecovery.h>
+#include <RecoveryPolicy.h>
 #include <esp_heap_caps.h>
 
 //🌙 added to telemetry
@@ -318,6 +319,7 @@ void ESP32SvelteKit::_loop()
 
     while (1)
     {
+        wifi_eth_combined = false;
 #if FT_ENABLED(FT_WIFI) // 🌙
         _wifiSettingsService.loop(); // 30 seconds
         _apSettingsService.loop();   // 10 seconds
@@ -370,7 +372,7 @@ void ESP32SvelteKit::_loop()
         }
 
 #ifdef CONFIG_RECOVERY_ENABLED
-        ConfigRecovery::loop(!safeModeMB && _connectionStatus != ConnectionStatus::OFFLINE && lps_all_snapshot > 0);
+        ConfigRecovery::loop(!safeModeMB && recoveryConnectivityHealthy(wifi_eth_combined, ap, event) && lps_all_snapshot > 0);
 #endif
 
         static int lastTime = 0;

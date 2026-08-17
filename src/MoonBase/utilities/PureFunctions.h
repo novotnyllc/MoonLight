@@ -138,6 +138,21 @@ inline bool isProtectedRecoveryPath(const char* path) {
   return false;
 }
 
+inline bool coalescedSnapshotOriginsMixed(bool snapshotPending, bool alreadyMixed, bool sameOrigin) {
+  return snapshotPending && (alreadyMixed || !sameOrigin);
+}
+
+inline bool usableLayerView(uint8_t view, size_t slotCount, bool selectedSlotPresent) {
+  return view == 0 || (static_cast<size_t>(view - 1) < slotCount && selectedSlotPresent);
+}
+
+template <typename Container, typename Callback>
+inline void forEachPresentPointer(Container& slots, Callback&& callback) {
+  for (auto* slot : slots) {
+    if (slot) callback(slot);
+  }
+}
+
 // Dimension constants (used by Nodes and VirtualLayer)
 #define _0D 0
 #define _1D 1

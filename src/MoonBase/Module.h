@@ -155,6 +155,7 @@ class Module : public StatefulService<ModuleState> {
 
  private:
   Char<32> snapshotOrigin;
+  bool snapshotOriginMixed = false;
   std::vector<StateUpdateCallback> snapshotHandlers;
   portMUX_TYPE snapshotMux = portMUX_INITIALIZER_UNLOCKED;
 };

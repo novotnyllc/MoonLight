@@ -113,14 +113,18 @@ PsychicWebSocketClient * PsychicWebSocketHandler::getClient(PsychicClient *clien
 }
 
 void PsychicWebSocketHandler::addClient(PsychicClient *client) {
+  lockClients();
   client->_friend = new PsychicWebSocketClient(client);
   PsychicHandler::addClient(client);
+  unlockClients();
 }
 
 void PsychicWebSocketHandler::removeClient(PsychicClient *client) {
+  lockClients();
   PsychicHandler::removeClient(client);
   delete (PsychicWebSocketClient*)client->_friend;
   client->_friend = NULL;
+  unlockClients();
 }
 
 void PsychicWebSocketHandler::openCallback(PsychicClient *client) {
@@ -235,13 +239,14 @@ PsychicWebSocketHandler * PsychicWebSocketHandler::onClose(PsychicWebSocketClien
 
 void PsychicWebSocketHandler::sendAll(httpd_ws_frame_t * ws_pkt)
 {
+  lockClients();
   for (PsychicClient *client : _clients)
   {
     //ESP_LOGD(PH_TAG, "Active client (fd=%d) -> sending async message", client->socket());
 
     if (client->_friend == NULL)
     {
-      return;
+      continue;
     }
 
     if (((PsychicWebSocketClient*)client->_friend)->sendMessage(ws_pkt) != ESP_OK)
@@ -251,6 +256,16 @@ void PsychicWebSocketHandler::sendAll(httpd_ws_frame_t * ws_pkt)
       continue;
     }
   }
+  unlockClients();
+}
+
+esp_err_t PsychicWebSocketHandler::sendTo(int socket, httpd_ws_type_t op, const void *data, size_t len)
+{
+  lockClients();
+  PsychicWebSocketClient *client = getClient(socket);
+  esp_err_t result = client ? client->sendMessage(op, data, len) : ESP_FAIL;
+  unlockClients();
+  return result;
 }
 
 void PsychicWebSocketHandler::sendAll(httpd_ws_type_t op, const void *data, size_t len)

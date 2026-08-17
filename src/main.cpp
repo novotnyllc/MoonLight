@@ -176,13 +176,21 @@ TaskHandle_t driverTaskHandle = nullptr;
 
       // Wait for driver to finish reading channelsD, then composite virtualChannels into it
       xSemaphoreTake(channelsDFreeSemaphore, portMAX_DELAY);
-      xSemaphoreTake(swapMutex, portMAX_DELAY);
-      if (layerP.lights.header.isPositions == 0) {  // check if layout didn't start while we were unlocked
-        layerP.compositeLayers();  // zero channelsD + composite all virtualChannels into it
-        newFrameReady = true;
-      } else {
-        xSemaphoreGive(channelsDFreeSemaphore);  // layout started — release so driver can signal again
+      {
+        // Global lifetime lock order: mapping -> node task mutex -> swap.
+        LayerMappingGuard mappingGuard(layerP.mappingMutex);
+        xSemaphoreTake(swapMutex, portMAX_DELAY);
+        if (layerP.lights.header.isPositions == 0) {  // check if layout didn't start while we were unlocked
+          layerP.compositeLayers();  // zero channelsD + composite all virtualChannels into it
+          newFrameReady = true;
+        } else {
+          xSemaphoreGive(channelsDFreeSemaphore);  // layout started — release so driver can signal again
+        }
+        xSemaphoreGive(swapMutex);
       }
+
+      vTaskDelay(1);
+      continue;
     }
 
     xSemaphoreGive(swapMutex);

@@ -156,6 +156,9 @@ class FastLEDAudioDriver : public Node {
   }
 
   void onUpdate(const JsonObject& control) override {
+#ifdef CONFIG_RECOVERY_ENABLED
+    if (!on) ConfigRecovery::reportSoundHealthy(false);
+#endif
     if (control["name"] == "signalConditioning") {
       audioProcessor.setSignalConditioningEnabled(signalConditioning);
     }
@@ -295,6 +298,7 @@ class FastLEDAudioDriver : public Node {
       lastTelemetryUpdate = millis();
       updateControl("samples", samplesCaptured);
       updateControl("level", audioLevel);
+      moduleNodes->queueSnapshot(name());
     }
   }
 

@@ -27,6 +27,10 @@ class PsychicHandler {
     String _subprotocol;
 
     std::list<PsychicClient*> _clients;
+    SemaphoreHandle_t _clientsMutex;
+
+    void lockClients();
+    void unlockClients();
 
   public:
     PsychicHandler();
@@ -55,8 +59,7 @@ class PsychicHandler {
     virtual void closeCallback(PsychicClient *client) {};
 
     bool hasClient(PsychicClient *client);
-    int count() { return _clients.size(); };
-    const std::list<PsychicClient*>& getClientList();
+    int count();
 
     //derived classes must implement these functions
     virtual bool canHandle(PsychicRequest *request) { return true; };

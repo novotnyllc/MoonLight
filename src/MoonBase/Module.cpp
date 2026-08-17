@@ -316,8 +316,9 @@ void Module::loop20ms() {
   portENTER_CRITICAL(&snapshotMux);
   if (requestUIUpdate) {
     requestUIUpdate = false;  // reset the flag
-    originId = snapshotOrigin;
+    originId = snapshotOriginMixed ? "" : snapshotOrigin;
     snapshotOrigin = "";
+    snapshotOriginMixed = false;
     sendSnapshot = true;
   }
   portEXIT_CRITICAL(&snapshotMux);
@@ -329,7 +330,9 @@ void Module::loop20ms() {
 
 void Module::queueSnapshot(const String& originId) {
   portENTER_CRITICAL(&snapshotMux);
-  snapshotOrigin = originId;
+  bool sameOrigin = snapshotOrigin == originId.c_str();
+  snapshotOriginMixed = coalescedSnapshotOriginsMixed(requestUIUpdate, snapshotOriginMixed, sameOrigin);
+  if (!requestUIUpdate) snapshotOrigin = originId;
   requestUIUpdate = true;
   portEXIT_CRITICAL(&snapshotMux);
 }

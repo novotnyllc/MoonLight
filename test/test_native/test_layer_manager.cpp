@@ -157,6 +157,25 @@ TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
   CHECK(layerP.layers[1] == nullptr);
 }
 
+TEST_CASE("mapping-before-node-before-swap ordering completes under interleaving") {
+  layerP.reset();
+  std::mutex nodeMutex;
+  std::mutex swapMutex;
+
+  auto driver = std::async(std::launch::async, [&]() {
+    LayerMappingGuard mapping(layerP.mappingMutex);
+    std::lock_guard<std::mutex> node(nodeMutex);
+    std::lock_guard<std::mutex> swap(swapMutex);
+  });
+  auto compositor = std::async(std::launch::async, [&]() {
+    LayerMappingGuard mapping(layerP.mappingMutex);
+    std::lock_guard<std::mutex> swap(swapMutex);
+  });
+
+  CHECK(driver.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(compositor.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------

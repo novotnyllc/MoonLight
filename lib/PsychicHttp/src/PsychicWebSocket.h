@@ -65,6 +65,7 @@ class PsychicWebSocketHandler : public PsychicHandler {
     void sendAll(httpd_ws_frame_t * ws_pkt);
     void sendAll(httpd_ws_type_t op, const void *data, size_t len);
     void sendAll(const char *buf);
+    esp_err_t sendTo(int socket, httpd_ws_type_t op, const void *data, size_t len);
 };
 
 #endif // PsychicWebSocket_h

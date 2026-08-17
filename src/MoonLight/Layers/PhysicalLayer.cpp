@@ -76,10 +76,7 @@ void PhysicalLayer::loop() {
   // Effects write to per-layer virtualChannels; channelsD is zeroed and composited
   // in compositeLayers(), called from main.cpp after channelsDFreeSemaphore is signalled.
 
-  for (uint8_t i = 0; i < activeLayerCount && i < layers.size(); i++) {
-    VirtualLayer* layer = layers[i];
-    if (!layer) continue;  // defensive, should not happen with sequential creation
-  
+  forEachPresentPointer(layers, [&](VirtualLayer* layer) {
     layer->loop();
 
     // Step transition animation: move transitionBrightness toward transitionTarget one step per frame
@@ -92,7 +89,7 @@ void PhysicalLayer::loop() {
       }
       layer->transitionBrightness = (uint8_t)next;
     }
-  }
+  });
 }
 
 void PhysicalLayer::compositeLayers() {
@@ -111,13 +108,11 @@ void PhysicalLayer::compositeLayers() {
 void PhysicalLayer::loop20ms() {
   LayerMappingGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
-  for (uint8_t i = 0; i < activeLayerCount && i < layers.size(); i++) {
-    VirtualLayer* layer = layers[i];
-    if (layer) layer->loop20ms();  // if (layer) needed when deleting rows ...
-  }
+  forEachPresentPointer(layers, [](VirtualLayer* layer) { layer->loop20ms(); });
 }
 
 void PhysicalLayer::loopDrivers() {
+  LayerMappingGuard guard(mappingMutex);
   // run mapping in the drivers task
 
   if (requestMapPhysical) {
@@ -131,7 +126,6 @@ void PhysicalLayer::loopDrivers() {
   }
 
   if (requestMapVirtual) {
-    LayerMappingGuard guard(mappingMutex);
     // wait until monitor has consumed the positions from pass 1 before running pass 2,
     // because pass 2 writes to channelsD which pass 1 used to store position data
     if (lights.header.isPositions == 2) return;  // will retry next loopDrivers() iteration
@@ -165,6 +159,7 @@ void PhysicalLayer::loopDrivers() {
 }
 
 void PhysicalLayer::loop20msDrivers() {
+  LayerMappingGuard guard(mappingMutex);
   // runs the loop of all effects / nodes in the layer
   for (Node* node : nodes) {
     if (node->on) {

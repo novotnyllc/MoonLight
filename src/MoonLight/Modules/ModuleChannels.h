@@ -30,12 +30,14 @@ class ModuleChannels : public Module {
     control = addControl(controls, "view", "select");
     control["default"] = 0;
     addControlValue(control, "Physical layer");
-    uint8_t i = 1; //start with 1
-    for (VirtualLayer* layer : layerP.layers) {
+    uint8_t highestActive = 0;
+    for (uint8_t index = 0; index < layerP.layers.size(); index++) {
+      if (layerP.layers[index]) highestActive = index;
+    }
+    for (uint8_t i = 1; i <= highestActive + 1; i++) {
       Char<12> layerName;
       layerName.format("Layer %d", i);
       addControlValue(control, layerName.c_str());
-      i++;
     }
 
     control = addControl(controls, "group", "checkbox");
@@ -58,9 +60,22 @@ class ModuleChannels : public Module {
     LayerMappingGuard guard(layerP.mappingMutex);
     uint8_t view = _state.data["view"];
     bool group = _state.data["group"];
+    VirtualLayer* selectedLayer = nullptr;
+    if (view > 0) {
+      uint8_t slot = view - 1;
+      bool selectedSlotPresent = slot < layerP.layers.size() && layerP.layers[slot];
+      if (!usableLayerView(view, layerP.layers.size(), selectedSlotPresent)) {
+        _state.data["view"] = 0;
+        queueSnapshot(_moduleName);
+        if (updatedItem.name == "channel") return;
+        view = 0;
+      } else {
+        selectedLayer = layerP.layers[slot];
+      }
+    }
 
     if (updatedItem.name == "view" || updatedItem.name == "group") {
-      uint16_t count = view == 0 ? layerP.lights.header.nrOfLights : layerP.layers[view - 1]->nrOfLights;
+      uint16_t count = view == 0 ? layerP.lights.header.nrOfLights : selectedLayer->nrOfLights;
       if (!group) count *= layerP.lights.header.channelsPerLight;
       if (count > 512) count = 512;
       if (count != _state.data["channel"]["count"]) {
@@ -87,9 +102,9 @@ class ModuleChannels : public Module {
             layerP.lights.channelsD[select] = value;
         } else {
           if (group)
-            for (uint8_t i = 0; i < layerP.lights.header.channelsPerLight; i++) layerP.layers[view - 1]->setLight(select, i, value); //setLight(select, &value, i, 1);
+            for (uint8_t i = 0; i < layerP.lights.header.channelsPerLight; i++) selectedLayer->setLight(select, i, value); //setLight(select, &value, i, 1);
           else
-            layerP.layers[view - 1]->setLight(select / layerP.lights.header.channelsPerLight, select % layerP.lights.header.channelsPerLight, value); //setLight(select / layerP.lights.header.channelsPerLight, &value, select % layerP.lights.header.channelsPerLight, 1);
+            selectedLayer->setLight(select / layerP.lights.header.channelsPerLight, select % layerP.lights.header.channelsPerLight, value); //setLight(select / layerP.lights.header.channelsPerLight, &value, select % layerP.lights.header.channelsPerLight, 1);
         }
       }
     } else {

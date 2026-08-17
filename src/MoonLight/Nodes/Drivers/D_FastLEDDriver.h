@@ -13,6 +13,8 @@
 
 #if FT_MOONLIGHT
 
+#include <RecoveryPolicy.h>
+
 // using the new FastLED channel api
 // https://github.com/FastLED/FastLED/blob/master/src/fl/channels/README.md
 
@@ -95,7 +97,16 @@ class FastLEDDriver : public DriverNode {
   fl::EOrder rgbOrder = GRB;
   fl::ChannelOptions options = fl::ChannelOptions();
   bool pdmForcesRmt = false;
-  uint8_t affinityBeforePdm = 0;
+
+  void applyEffectiveAffinity() {
+    switch (recoveryEffectiveAffinity(affinity, pdmForcesRmt)) {
+    case 0: options.mAffinity = ""; break;
+    case 1: options.mAffinity = "RMT"; break;
+    case 2: options.mAffinity = "I2S"; break;
+    case 3: options.mAffinity = "SPI"; break;
+    case 4: options.mAffinity = "PARLIO"; break;
+    }
+  }
 
   bool reserveRmtForPdm() {
     bool hasPdmData = false;
@@ -108,28 +119,10 @@ class FastLEDDriver : public DriverNode {
       }
     }, "FastLEDDriver");
     bool shouldForceRmt = hasPdmData && hasPdmClock;
-    if (shouldForceRmt && !pdmForcesRmt) {
-      affinityBeforePdm = affinity;
-      pdmForcesRmt = true;
-      affinity = 1;
-      updateControl("affinity", affinity);
-      options.mAffinity = "RMT";
-      return true;
-    }
-    if (!shouldForceRmt && pdmForcesRmt) {
-      pdmForcesRmt = false;
-      affinity = affinityBeforePdm;
-      updateControl("affinity", affinity);
-      switch (affinity) {
-      case 0: options.mAffinity = ""; break;
-      case 1: options.mAffinity = "RMT"; break;
-      case 2: options.mAffinity = "I2S"; break;
-      case 3: options.mAffinity = "SPI"; break;
-      case 4: options.mAffinity = "PARLIO"; break;
-      }
-      return true;
-    }
-    return false;
+    bool changed = shouldForceRmt != pdmForcesRmt;
+    pdmForcesRmt = shouldForceRmt;
+    applyEffectiveAffinity();
+    return changed;
   }
 
   void onUpdate(const JsonObject& control) override {
@@ -209,31 +202,7 @@ class FastLEDDriver : public DriverNode {
     }
 
     else if (control["name"] == "affinity") {
-      uint8_t requestedAffinity = control["value"].as<uint8_t>();
-      if (pdmForcesRmt) {
-        affinityBeforePdm = requestedAffinity;
-        affinity = 1;
-        updateControl("affinity", affinity);
-        options.mAffinity = "RMT";
-        return;
-      }
-      switch (requestedAffinity) {
-      case 0:  // auto
-        options.mAffinity = "";
-        break;
-      case 1:
-        options.mAffinity = "RMT";
-        break;
-      case 2:
-        options.mAffinity = "I2S";
-        break;
-      case 3:
-        options.mAffinity = "SPI";
-        break;
-      case 4:
-        options.mAffinity = "PARLIO";
-        break;
-      }
+      applyEffectiveAffinity();
       // FastLED.setExclusiveDriver(options.mAffinity.c_str());
     }
 
@@ -312,7 +281,7 @@ class FastLEDDriver : public DriverNode {
     if (layerP.pass == 1 && !layerP.monitorPass) {
       uint8_t nrOfPins = MIN(layerP.nrOfLedPins, layerP.nrOfAssignedPins);
 
-      if (affinity == 1 && nrOfPins > 4) nrOfPins = 4;  // FastLED RMT supports max 4 pins!, what about SPI?
+      if (recoveryEffectiveAffinity(affinity, pdmForcesRmt) == 1 && nrOfPins > 4) nrOfPins = 4;  // FastLED RMT supports max 4 pins!, what about SPI?
 
       if (nrOfPins == 0) return;
 
