@@ -207,6 +207,19 @@ TEST_CASE("contains") {
   CHECK_FALSE(contains("test", nullptr));
 }
 
+TEST_CASE("protected recovery paths") {
+  CHECK(isProtectedRecoveryPath("/.config-recovery"));
+  CHECK(isProtectedRecoveryPath("/.config-recovery/slot0/config/effects.json"));
+  CHECK(isProtectedRecoveryPath(".config-recovery/active"));
+  CHECK(isProtectedRecoveryPath("/foo/../.config-recovery/slot1"));
+  CHECK(isProtectedRecoveryPath("/rest/file/.config-recovery/active"));
+  CHECK_FALSE(isProtectedRecoveryPath("/.config"));
+  CHECK_FALSE(isProtectedRecoveryPath("/livescripts/example.sc"));
+  CHECK_FALSE(isProtectedRecoveryPath("/.config-recovery-backup"));
+  CHECK_FALSE(isProtectedRecoveryPath("/foo/.config-recovery.json"));
+  CHECK_FALSE(isProtectedRecoveryPath(nullptr));
+}
+
 // ============================================================
 // Char<N> tests (included directly from Char.h — no copy!)
 // ============================================================

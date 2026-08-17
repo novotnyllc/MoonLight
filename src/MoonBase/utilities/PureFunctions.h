@@ -123,6 +123,21 @@ inline bool contains(const char* a, const char* b) {
   return strstr(a, b) != nullptr;
 }
 
+inline bool isProtectedRecoveryPath(const char* path) {
+  if (!path) return false;
+  constexpr char protectedSegment[] = ".config-recovery";
+  constexpr size_t protectedLength = sizeof(protectedSegment) - 1;
+  while (*path) {
+    while (*path == '/') ++path;
+    const char* end = strchr(path, '/');
+    size_t length = end ? static_cast<size_t>(end - path) : strlen(path);
+    if (length == protectedLength && strncmp(path, protectedSegment, protectedLength) == 0) return true;
+    if (!end) break;
+    path = end + 1;
+  }
+  return false;
+}
+
 // Dimension constants (used by Nodes and VirtualLayer)
 #define _0D 0
 #define _1D 1

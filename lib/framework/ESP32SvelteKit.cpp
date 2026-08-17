@@ -73,12 +73,16 @@ ESP32SvelteKit::ESP32SvelteKit(PsychicHttpServer *server, unsigned int numberEnd
 {
 }
 
-void ESP32SvelteKit::begin()
+bool ESP32SvelteKit::begin()
 {
     ESP_LOGV(SVK_TAG, "Loading settings from files system");
     ESPFS.begin(true);
 #ifdef CONFIG_RECOVERY_ENABLED
-    ConfigRecovery::begin(&ESPFS, esp_reset_reason());
+    if (!ConfigRecovery::begin(&ESPFS, esp_reset_reason())) {
+        safeModeMB = true;
+        ESP_LOGE(SVK_TAG, "Configuration recovery failed; settings initialization blocked");
+        return false;
+    }
     if (ConfigRecovery::restoredThisBoot()) safeModeMB = false;
 #endif
 
@@ -296,6 +300,7 @@ void ESP32SvelteKit::begin()
                        ESP32SVELTEKIT_RUNNING_CORE           // Pin to application core
 #endif
     );
+    return true;
 }
 
 void ESP32SvelteKit::_loop()

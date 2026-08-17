@@ -265,11 +265,12 @@ bool isFailureReset(esp_reset_reason_t reason) {
 }
 }  // namespace
 
-void ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
+bool ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
   recoveryFs = fs;
   readLastAction();
   activeSlot = readActiveSlot();
   recoveryAvailable = activeSlot >= 0;
+  bool restoreInProgress = recoveryFs->exists(RESTORE_MARKER_FILE);
   currentFingerprint = fingerprintCurrent();
   confirmedFingerprint = recoveryAvailable ? fingerprintWorkingSet(slotRoot(activeSlot)) : Fingerprint{};
   if (recoveryAvailable && !confirmedFingerprint.valid) {
@@ -277,16 +278,21 @@ void ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
     recoveryAvailable = false;
   }
 
-  if (recoveryAvailable && recoveryFs->exists(RESTORE_MARKER_FILE)) {
+  if (restoreInProgress) {
+    if (!recoveryAvailable) {
+      ESP_LOGE(TAG, "Interrupted configuration restore has no valid active slot");
+      return false;
+    }
     ESP_LOGW(TAG, "Resuming interrupted configuration restore from slot %d", activeSlot);
     if (restoreSlot(activeSlot)) {
       setLastAction("restored");
       currentFingerprint = confirmedFingerprint;
       recoveryPending = false;
       forceRestorePerformed = true;
-      return;
+      return true;
     }
-    ESP_LOGE(TAG, "Interrupted configuration restore retry failed; continuing in safe mode");
+    ESP_LOGE(TAG, "Interrupted configuration restore retry failed; blocking settings initialization");
+    return false;
   }
 
   if (forceRestoreRequested && recoveryAvailable) {
@@ -296,9 +302,10 @@ void ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
       currentFingerprint = confirmedFingerprint;
       recoveryPending = false;
       forceRestorePerformed = true;
-      return;
+      return true;
     }
-    ESP_LOGE(TAG, "Button-requested configuration restore failed; continuing in safe mode");
+    ESP_LOGE(TAG, "Button-requested configuration restore failed; blocking settings initialization");
+    return false;
   }
 
   if (recoveryAvailable && currentFingerprint.valid && isFailureReset(resetReason) && currentFingerprint != confirmedFingerprint) {
@@ -308,13 +315,15 @@ void ConfigRecovery::begin(FS* fs, esp_reset_reason_t resetReason) {
       delay(100);
       ESP.restart();
     }
-    ESP_LOGE(TAG, "Configuration restore failed; continuing in safe mode");
+    ESP_LOGE(TAG, "Configuration restore failed; blocking settings initialization");
+    return false;
   }
 
   recoveryPending = !recoveryAvailable || currentFingerprint != confirmedFingerprint;
   candidateHealthy = false;
   candidateSince = millis();
   lastScan = millis();
+  return true;
 }
 
 void ConfigRecovery::loop(bool healthy) {

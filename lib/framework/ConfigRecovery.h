@@ -7,7 +7,7 @@
 
 class ConfigRecovery {
  public:
-  static void begin(FS* fs, esp_reset_reason_t resetReason);
+  static bool begin(FS* fs, esp_reset_reason_t resetReason);
   static void loop(bool healthy);
   static void clear();
   static void requestRestore();

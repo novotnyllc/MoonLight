@@ -334,7 +334,10 @@ void setup() {
   }
 
   // start ESP32-SvelteKit
-  esp32sveltekit.begin();
+  if (!esp32sveltekit.begin()) {
+    ESP_LOGE(ML_TAG, "Startup stopped after failed configuration recovery");
+    return;
+  }
 
   // Create shared routers (one-time)
   sharedHttpEndpoint = new SharedHttpEndpoint(&server, esp32sveltekit.getSecurityManager());

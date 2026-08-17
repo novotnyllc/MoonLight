@@ -24,7 +24,7 @@ void addFolder(File folder, bool showHidden, const JsonArray& fileArray) {
     if (!file) {
       break;
     } else {
-      if (showHidden || file.name()[0] != '.') {
+      if (!isProtectedRecoveryPath(file.path()) && (showHidden || file.name()[0] != '.')) {
         JsonObject fileObject = fileArray.add<JsonObject>();
         fileObject["name"] = (char*)file.name();  // enforces copy, solved in latest arduinojson!, see https://arduinojson.org/news/2024/12/29/arduinojson-7-3/
         fileObject["path"] = (char*)file.path();  // enforces copy, solved in latest arduinojson!, see https://arduinojson.org/news/2024/12/29/arduinojson-7-3/
@@ -70,24 +70,34 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
   JsonArray deletes = newData["deletes"].as<JsonArray>();
   if (!deletes.isNull()) {
     for (JsonObject var : deletes) {
-      EXT_LOGI(MB_TAG, "delete %s %s", var["path"].as<const char*>(), var["isFile"] ? "File" : "Folder");
+      const char* path = var["path"].as<const char*>();
+      if (!path || isProtectedRecoveryPath(path)) {
+        EXT_LOGW(MB_TAG, "Rejected invalid or protected recovery delete path");
+        continue;
+      }
+      EXT_LOGI(MB_TAG, "delete %s %s", path, var["isFile"] ? "File" : "Folder");
       // print->printJson("new file", var);
       if (var["isFile"])
-        ESPFS.remove(var["path"].as<const char*>());
+        ESPFS.remove(path);
       else
-        ESPFS.rmdir(var["path"].as<const char*>());
+        ESPFS.rmdir(path);
 
-      state.updatedItems.push_back(var["path"].as<const char*>());
+      state.updatedItems.push_back(path);
     }
   }
 
   JsonArray news = newData["news"].as<JsonArray>();
   if (!news.isNull()) {
     for (JsonObject var : news) {
-      EXT_LOGI(MB_TAG, "new %s %s", var["path"].as<const char*>(), var["isFile"] ? "File" : "Folder");
+      const char* path = var["path"].as<const char*>();
+      if (!path || isProtectedRecoveryPath(path)) {
+        EXT_LOGW(MB_TAG, "Rejected invalid or protected recovery create path");
+        continue;
+      }
+      EXT_LOGI(MB_TAG, "new %s %s", path, var["isFile"] ? "File" : "Folder");
       // print->printJson("new file", var);
       if (var["isFile"]) {
-        File file = ESPFS.open(var["path"].as<const char*>(), FILE_WRITE);
+        File file = ESPFS.open(path, FILE_WRITE);
         const char* contents = var["contents"];
         if (strlen(contents)) {
           if (!file.write(reinterpret_cast<const byte*>(contents), strlen(contents))) {  // changed not true as contents is not part of the state
@@ -96,18 +106,31 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
         }
         file.close();
       } else {
-        ESPFS.mkdir(var["path"].as<const char*>());
+        ESPFS.mkdir(path);
       }
-      state.updatedItems.push_back(var["path"].as<const char*>());
+      state.updatedItems.push_back(path);
     }
   }
 
   JsonArray updates = newData["updates"].as<JsonArray>();
   if (!updates.isNull()) {
     for (JsonObject var : updates) {
+      const char* source = var["path"].as<const char*>();
+      const char* name = var["name"].as<const char*>();
+      if (!source || !name) {
+        EXT_LOGW(MB_TAG, "Rejected invalid update path");
+        continue;
+      }
+      String sourcePath = source;
+      int lastSlash = sourcePath.lastIndexOf('/');
+      String destinationPath = (lastSlash >= 0 ? sourcePath.substring(0, lastSlash + 1) : String("/")) + name;
+      if (isProtectedRecoveryPath(sourcePath.c_str()) || isProtectedRecoveryPath(destinationPath.c_str())) {
+        EXT_LOGW(MB_TAG, "Rejected protected recovery update path");
+        continue;
+      }
       EXT_LOGI(MB_TAG, "update %s %s", var["path"].as<const char*>(), var["isFile"] ? "File" : "Folder");
       // print->printJson("update file", var);
-      File file = ESPFS.open(var["path"].as<const char*>(), FILE_WRITE);
+      File file = ESPFS.open(sourcePath.c_str(), FILE_WRITE);
       if (!file) {
         EXT_LOGE(MB_TAG, "Failed to open file");
       } else {
@@ -117,17 +140,12 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
         }
         file.close();
 
-        char newPath[64];
-        extractPath(var["path"], newPath, sizeof(newPath));
-        strcat(newPath, "/");
-        strcat(newPath, var["name"]);
+        EXT_LOGI(MB_TAG, "rename %s to %s", sourcePath.c_str(), destinationPath.c_str());
 
-        EXT_LOGI(MB_TAG, "rename %s to %s", var["path"].as<const char*>(), newPath);
-
-        if (strcmp(var["path"], newPath) != 0) {
-          ESPFS.rename(var["path"].as<const char*>(), newPath);
+        if (sourcePath != destinationPath) {
+          ESPFS.rename(sourcePath.c_str(), destinationPath.c_str());
         }
-        state.updatedItems.push_back(var["path"].as<const char*>());
+        state.updatedItems.push_back(sourcePath);
       }
     }
   }
@@ -155,7 +173,7 @@ void FileManager::begin() {
 
   // setup the file server
   _server->serveStatic("/rest/file", ESPFS, "/")->setFilter([](PsychicRequest* request) {
-    return request->uri().indexOf("/.config-recovery") < 0;
+    return !isProtectedRecoveryPath(request->uri().c_str());
   });
 
   _server->on("/rest/saveConfig", HTTP_POST,
