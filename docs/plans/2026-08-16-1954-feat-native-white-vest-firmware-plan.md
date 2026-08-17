@@ -45,5 +45,5 @@ Read OTA selection and checksum the complete active rollback partition and custo
 - Narrow coordinate check and `pio run -e esp32-d0-pico2` exit zero without masked failures.
 - Focused diff and secret scan are clean; an independent review has no blocking findings.
 - Active slot and prior/custom app images have recorded SHA-256 checksums.
-- Device boots the custom version, allocates 720 virtual cells/2,880 bytes for exactly 95 LEDs, obtains HouseNet IoT DHCP, remains reachable, reports the expected target/version, and keeps output off. Authentication failure of the preserved Wi-Fi profile is a separate unresolved configuration gate, not firmware stability proof.
+- Device boots the custom version, allocates 720 virtual cells/2,880 bytes for exactly 95 LEDs, obtains HouseNet IoT DHCP, remains reachable, reports the expected target/version, and keeps output off. The stored Wi-Fi profile was verified unchanged; transient authentication retries cleared without a settings write.
 - Source is merged to `novotnyllc/MoonLight`, tag `v1.0.0-whitevest.2` is published, and the final flashed image is the tagged artifact.
