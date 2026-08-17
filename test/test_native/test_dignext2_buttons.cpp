@@ -19,10 +19,21 @@ TEST_CASE("Dig-Next-2 button hold policy") {
   updateDigNext2Button(button1Medium, true, 100, true, false);
   CHECK(updateDigNext2Button(button1Medium, false, 601, true, false) == DigNext2ButtonAction::None);
 
+  DigNext2ButtonState button1Long;
+  updateDigNext2Button(button1Long, false, 0, true, false);
+  updateDigNext2Button(button1Long, true, 100, true, false);
+  CHECK(updateDigNext2Button(button1Long, true, 3100, true, false) == DigNext2ButtonAction::None);
+  CHECK(updateDigNext2Button(button1Long, false, 3101, true, false) == DigNext2ButtonAction::None);
+
   DigNext2ButtonState button2;
   updateDigNext2Button(button2, false, 0, false, false);
   updateDigNext2Button(button2, true, 100, false, false);
   CHECK(updateDigNext2Button(button2, false, 600, false, false) == DigNext2ButtonAction::PreviousPreset);
+
+  DigNext2ButtonState button2Medium;
+  updateDigNext2Button(button2Medium, false, 0, false, false);
+  updateDigNext2Button(button2Medium, true, 100, false, false);
+  CHECK(updateDigNext2Button(button2Medium, false, 7999, false, false) == DigNext2ButtonAction::None);
 
   DigNext2ButtonState button2Long;
   updateDigNext2Button(button2Long, false, 0, false, false);
@@ -31,6 +42,11 @@ TEST_CASE("Dig-Next-2 button hold policy") {
   CHECK(updateDigNext2Button(button2Long, true, 8100, false, false) == DigNext2ButtonAction::ToggleSoftBlackout);
   CHECK(updateDigNext2Button(button2Long, true, 9000, false, true) == DigNext2ButtonAction::None);
   CHECK(updateDigNext2Button(button2Long, false, 9001, false, true) == DigNext2ButtonAction::None);
+
+  DigNext2ButtonState button2ReleaseAtThreshold;
+  updateDigNext2Button(button2ReleaseAtThreshold, false, 0, false, false);
+  updateDigNext2Button(button2ReleaseAtThreshold, true, 100, false, false);
+  CHECK(updateDigNext2Button(button2ReleaseAtThreshold, false, 8100, false, false) == DigNext2ButtonAction::ToggleSoftBlackout);
 }
 
 TEST_CASE("Dig-Next-2 blackout wake consumes short releases") {

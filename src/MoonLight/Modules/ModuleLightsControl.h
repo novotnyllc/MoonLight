@@ -589,6 +589,7 @@ class ModuleLightsControl : public Module {
   }
 
   void applySoftBlackout() {
+    LayerMappingGuard guard(layerP.mappingMutex);
     uint8_t target = softBlackout ? 0 : 255;
     for (VirtualLayer* layer : layerP.layers) {
       if (!layer) continue;
