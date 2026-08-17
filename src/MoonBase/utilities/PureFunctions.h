@@ -123,6 +123,40 @@ inline bool contains(const char* a, const char* b) {
   return strstr(a, b) != nullptr;
 }
 
+inline bool isProtectedRecoveryPath(const char* path) {
+  if (!path) return false;
+  constexpr char protectedSegment[] = ".config-recovery";
+  constexpr size_t protectedLength = sizeof(protectedSegment) - 1;
+  while (*path) {
+    while (*path == '/') ++path;
+    const char* end = strchr(path, '/');
+    size_t length = end ? static_cast<size_t>(end - path) : strlen(path);
+    if (length == protectedLength && strncmp(path, protectedSegment, protectedLength) == 0) return true;
+    if (!end) break;
+    path = end + 1;
+  }
+  return false;
+}
+
+inline bool coalescedSnapshotOriginsMixed(bool snapshotPending, bool alreadyMixed, bool sameOrigin) {
+  return snapshotPending && (alreadyMixed || !sameOrigin);
+}
+
+inline bool usableLayerView(uint8_t view, size_t slotCount, bool selectedSlotPresent) {
+  return view == 0 || (static_cast<size_t>(view - 1) < slotCount && selectedSlotPresent);
+}
+
+inline bool channelSelectionInBounds(bool grouped, uint32_t selected, uint32_t lightCount, uint32_t channelCount) {
+  return grouped ? selected < lightCount : selected < channelCount;
+}
+
+template <typename Container, typename Callback>
+inline void forEachPresentPointer(Container& slots, Callback&& callback) {
+  for (auto* slot : slots) {
+    if (slot) callback(slot);
+  }
+}
+
 // Dimension constants (used by Nodes and VirtualLayer)
 #define _0D 0
 #define _1D 1
@@ -238,5 +272,30 @@ inline void updateControl(const JsonObject& control) {
       }
 #endif
     }
+  }
+}
+
+/// Refreshes a JSON control from its bound runtime value. Read-only telemetry
+/// must never be overwritten by a stale persisted value during boot.
+inline void readControl(const JsonObject& control) {
+  if (control["p"].isNull()) return;
+  uintptr_t pointer = control["p"];
+  if (!pointer) return;
+
+  if (control["type"] == "slider" || control["type"] == "select" || control["type"] == "pin" || control["type"] == "number") {
+    if (control["size"] == 8) control["value"] = *reinterpret_cast<uint8_t*>(pointer);
+    else if (control["size"] == 108) control["value"] = *reinterpret_cast<int8_t*>(pointer);
+    else if (control["size"] == 16) control["value"] = *reinterpret_cast<uint16_t*>(pointer);
+    else if (control["size"] == 32) control["value"] = *reinterpret_cast<uint32_t*>(pointer);
+    else if (control["size"] == 33) control["value"] = *reinterpret_cast<int*>(pointer);
+    else if (control["size"] == 34) control["value"] = *reinterpret_cast<float*>(pointer);
+  } else if (control["type"] == "selectFile" || control["type"] == "text") {
+    control["value"] = reinterpret_cast<const char*>(pointer);
+  } else if (control["type"] == "checkbox" && control["size"] == sizeof(bool)) {
+    control["value"] = *reinterpret_cast<bool*>(pointer);
+#ifdef ARDUINO
+  } else if (control["type"] == "coord3D" && control["size"] == sizeof(Coord3D)) {
+    control["value"] = *reinterpret_cast<Coord3D*>(pointer);
+#endif
   }
 }

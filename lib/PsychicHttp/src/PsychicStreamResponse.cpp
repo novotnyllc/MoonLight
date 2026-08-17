@@ -33,16 +33,21 @@ esp_err_t PsychicStreamResponse::beginSend()
     return ESP_OK;
 
   //Buffer to hold ChunkPrinter and stream buffer. Using placement new will keep us at a single allocation.
-  _buffer = (uint8_t*)malloc(STREAM_CHUNK_SIZE + sizeof(ChunkPrinter));
+  size_t chunkSize = STREAM_CHUNK_SIZE;
+  _buffer = (uint8_t*)malloc(chunkSize + sizeof(ChunkPrinter));
+  if (!_buffer)
+  {
+    chunkSize = 256;
+    _buffer = (uint8_t*)malloc(chunkSize + sizeof(ChunkPrinter));
+  }
   
   if(!_buffer)
   {
-    /* Respond with 500 Internal Server Error */
-    httpd_resp_send_err(_request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate memory.");
+    sendServiceUnavailable(_request);
     return ESP_FAIL;
   }
 
-  _printer = new (_buffer) ChunkPrinter(this, _buffer + sizeof(ChunkPrinter), STREAM_CHUNK_SIZE);
+  _printer = new (_buffer) ChunkPrinter(this, _buffer + sizeof(ChunkPrinter), chunkSize);
 
   sendHeaders();
   return ESP_OK;

@@ -22,6 +22,7 @@ class ModuleChannels : public Module {
   ModuleChannels(PsychicHttpServer* server, ESP32SvelteKit* sveltekit) : Module("channels", server, sveltekit) { EXT_LOGV(ML_TAG, "constructor"); }
 
   void setupDefinition(const JsonArray& controls) override {
+    LayerMappingGuard guard(layerP.mappingMutex);
     EXT_LOGV(ML_TAG, "");
 
     JsonObject control;  // state.data has one or more properties
@@ -29,12 +30,14 @@ class ModuleChannels : public Module {
     control = addControl(controls, "view", "select");
     control["default"] = 0;
     addControlValue(control, "Physical layer");
-    uint8_t i = 1; //start with 1
-    for (VirtualLayer* layer : layerP.layers) {
+    uint8_t highestActive = 0;
+    for (uint8_t index = 0; index < layerP.layers.size(); index++) {
+      if (layerP.layers[index]) highestActive = index;
+    }
+    for (uint8_t i = 1; i <= highestActive + 1; i++) {
       Char<12> layerName;
       layerName.format("Layer %d", i);
       addControlValue(control, layerName.c_str());
-      i++;
     }
 
     control = addControl(controls, "group", "checkbox");
@@ -54,11 +57,25 @@ class ModuleChannels : public Module {
   }
 
   void onUpdate(const UpdatedItem& updatedItem) override {
+    LayerMappingGuard guard(layerP.mappingMutex);
     uint8_t view = _state.data["view"];
     bool group = _state.data["group"];
+    VirtualLayer* selectedLayer = nullptr;
+    if (view > 0) {
+      uint8_t slot = view - 1;
+      bool selectedSlotPresent = slot < layerP.layers.size() && layerP.layers[slot];
+      if (!usableLayerView(view, layerP.layers.size(), selectedSlotPresent)) {
+        _state.data["view"] = 0;
+        queueSnapshot(_moduleName);
+        if (updatedItem.name == "channel") return;
+        view = 0;
+      } else {
+        selectedLayer = layerP.layers[slot];
+      }
+    }
 
     if (updatedItem.name == "view" || updatedItem.name == "group") {
-      uint16_t count = view == 0 ? layerP.lights.header.nrOfLights : layerP.layers[view - 1]->nrOfLights;
+      uint16_t count = view == 0 ? layerP.lights.header.nrOfLights : selectedLayer->nrOfLights;
       if (!group) count *= layerP.lights.header.channelsPerLight;
       if (count > 512) count = 512;
       if (count != _state.data["channel"]["count"]) {
@@ -77,6 +94,9 @@ class ModuleChannels : public Module {
         if (!layerP.lights.channelsD) return; // to avoid crash during init
         // EXT_LOGD(ML_TAG, "handle %s[%d]%s[%d].%s = %s -> %s", updatedItem.parent[0].c_str(), updatedItem.index[0], updatedItem.parent[1].c_str(), updatedItem.index[1], updatedItem.name.c_str(), updatedItem.oldValue.c_str(), updatedItem.value.as<String>().c_str());
         uint16_t select = updatedItem.value["select"];
+        uint32_t lightCount = view == 0 ? layerP.lights.header.nrOfLights : selectedLayer->nrOfLights;
+        uint32_t channelCount = lightCount * layerP.lights.header.channelsPerLight;
+        if (!channelSelectionInBounds(group, select, lightCount, channelCount)) return;
         uint8_t value = updatedItem.value["action"] == "mouseenter" ? 255 : 0;
         if (view == 0) {  // physical layer
           if (group)
@@ -85,9 +105,9 @@ class ModuleChannels : public Module {
             layerP.lights.channelsD[select] = value;
         } else {
           if (group)
-            for (uint8_t i = 0; i < layerP.lights.header.channelsPerLight; i++) layerP.layers[view - 1]->setLight(select, i, value); //setLight(select, &value, i, 1);
+            for (uint8_t i = 0; i < layerP.lights.header.channelsPerLight; i++) selectedLayer->setLight(select, i, value); //setLight(select, &value, i, 1);
           else
-            layerP.layers[view - 1]->setLight(select / layerP.lights.header.channelsPerLight, select % layerP.lights.header.channelsPerLight, value); //setLight(select / layerP.lights.header.channelsPerLight, &value, select % layerP.lights.header.channelsPerLight, 1);
+            selectedLayer->setLight(select / layerP.lights.header.channelsPerLight, select % layerP.lights.header.channelsPerLight, value); //setLight(select / layerP.lights.header.channelsPerLight, &value, select % layerP.lights.header.channelsPerLight, 1);
         }
       }
     } else {

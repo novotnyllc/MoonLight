@@ -1,6 +1,7 @@
 #include <EventSocket.h>
 
 SemaphoreHandle_t clientSubscriptionsMutex = xSemaphoreCreateMutex();
+SemaphoreHandle_t eventSerializationMutex = xSemaphoreCreateMutex();
 
 EventSocket::EventSocket(PsychicHttpServer *server,
                          SecurityManager *securityManager,
@@ -88,7 +89,9 @@ esp_err_t EventSocket::onFrame(PsychicWebSocketRequest *request, httpd_ws_frame 
                 // only subscribe to events that are registered
                 if (isEventValid(doc["data"].as<String>()))
                 {
+                    xSemaphoreTake(clientSubscriptionsMutex, portMAX_DELAY);
                     client_subscriptions[doc["data"]].push_back(request->client()->socket());
+                    xSemaphoreGive(clientSubscriptionsMutex);
                     handleSubscribeCallbacks(doc["data"], String(request->client()->socket()));
                 }
                 else
@@ -98,7 +101,9 @@ esp_err_t EventSocket::onFrame(PsychicWebSocketRequest *request, httpd_ws_frame 
             }
             else if (event == "unsubscribe")
             {
+                xSemaphoreTake(clientSubscriptionsMutex, portMAX_DELAY);
                 client_subscriptions[doc["data"]].remove(request->client()->socket());
+                xSemaphoreGive(clientSubscriptionsMutex);
             }
             else
             {
@@ -124,6 +129,7 @@ void EventSocket::emitEvent(const String& event, const JsonObject &jsonObject, c
 // 🌙 extracted from above function so the caller can prepare the JsonDocument, which saves on heap usage
 void EventSocket::emitEvent(const JsonDocument &doc, const char *originId, bool onlyToSameOrigin)
 {
+    xSemaphoreTake(eventSerializationMutex, portMAX_DELAY);
     #if FT_ENABLED(EVENT_USE_JSON)
         static String outBuffer;      // reused across calls to avoid repeated allocation
         outBuffer.clear();            // keep capacity, reset length
@@ -153,6 +159,7 @@ void EventSocket::emitEvent(const JsonDocument &doc, const char *originId, bool 
 
         emitEvent(doc["event"], (char *)outBuffer.data(), outBuffer.size(), originId, onlyToSameOrigin);
     #endif
+    xSemaphoreGive(eventSerializationMutex);
 }
 
 // 🌙 extracted from above function for FT_MONITOR, which uses char *output
@@ -177,22 +184,14 @@ void EventSocket::emitEvent(const String& event, const char *output, size_t len,
     // if onlyToSameOrigin == true, send the message back to the origin
     if (onlyToSameOrigin && originSubscriptionId > 0)
     {
-        auto *client = _socket.getClient(originSubscriptionId);
-        if (client)
-        {
-            if (event != "monitor")
-                ESP_LOGV(SVK_TAG, "Emitting event: %s to %s[%u], Message[%d]: %s", event.c_str(), client->remoteIP().toString().c_str(), client->socket(), len, output);
 #if FT_ENABLED(EVENT_USE_JSON)
-            esp_err_t result = client->sendMessage(HTTPD_WS_TYPE_TEXT, output, len);
+        esp_err_t result = _socket.sendTo(originSubscriptionId, HTTPD_WS_TYPE_TEXT, output, len);
 #else
-            esp_err_t result = client->sendMessage(HTTPD_WS_TYPE_BINARY, output, len);
+        esp_err_t result = _socket.sendTo(originSubscriptionId, HTTPD_WS_TYPE_BINARY, output, len);
 #endif
-            // 🌙 error check
-            if (result != ESP_OK)
-            {
-                ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %d: %s (len: %zu)", event.c_str(), originId, client->socket(), esp_err_to_name(result), len);
-                // subscriptions.remove(originSubscriptionId);
-            }
+        if (result != ESP_OK)
+        {
+            ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %d: %s (len: %zu)", event.c_str(), originId, originSubscriptionId, esp_err_to_name(result), len);
         }
     }
     else
@@ -207,23 +206,15 @@ void EventSocket::emitEvent(const String& event, const char *output, size_t len,
                 ++it;
                 continue;
             }
-            auto *client = _socket.getClient(subscription);
-            if (!client)
-            {
-                it = subscriptions.erase(it);
-                continue;
-            }
-            if (event != "monitor")
-                ESP_LOGV(SVK_TAG, "Emitting event: %s to %s[%u], Message[%d]: %s", event.c_str(), client->remoteIP().toString().c_str(), client->socket(), len, output);
 #if FT_ENABLED(EVENT_USE_JSON)
-            esp_err_t result = client->sendMessage(HTTPD_WS_TYPE_TEXT, output, len);
+            esp_err_t result = _socket.sendTo(subscription, HTTPD_WS_TYPE_TEXT, output, len);
 #else
-            esp_err_t result = client->sendMessage(HTTPD_WS_TYPE_BINARY, output, len);
+            esp_err_t result = _socket.sendTo(subscription, HTTPD_WS_TYPE_BINARY, output, len);
 #endif
             // 🌙 error check
             if (result != ESP_OK)
             {
-                ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %u: %s (len: %zu)", event.c_str(), originId, client->socket(), esp_err_to_name(result), len);
+                ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %u: %s (len: %zu)", event.c_str(), originId, subscription, esp_err_to_name(result), len);
                 // it = subscriptions.erase(it);// do not erase as we hope for better times
                 it = subscriptions.erase(it);  // remove dead client; don't keep retrying
                 continue;
@@ -279,7 +270,7 @@ bool EventSocket::isEventValid(String event)
 
 unsigned int EventSocket::getConnectedClients()
 {
-    return (unsigned int)_socket.getClientList().size();
+    return (unsigned int)_socket.count();
 }
 
 // 🌙 Client info / visibility / active clients

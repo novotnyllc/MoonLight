@@ -367,7 +367,7 @@ const String PsychicRequest::getSessionKey(const String &key)
 
 void PsychicRequest::setSessionKey(const String &key, const String &value)
 {
-    this->_session->insert(std::pair<String, String>(key, value));
+    (*this->_session)[key] = value;
 }
 
 static const String md5str(const String &in)

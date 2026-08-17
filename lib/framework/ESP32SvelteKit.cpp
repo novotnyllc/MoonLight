@@ -13,6 +13,10 @@
  **/
 
 #include <ESP32SvelteKit.h>
+#include <ConfigRecovery.h>
+#include <MdnsRegistrationPolicy.h>
+#include <RecoveryPolicy.h>
+#include <esp_heap_caps.h>
 
 //🌙 added to telemetry
 bool safeModeMB = false; // 🌙 see .h
@@ -71,10 +75,18 @@ ESP32SvelteKit::ESP32SvelteKit(PsychicHttpServer *server, unsigned int numberEnd
 {
 }
 
-void ESP32SvelteKit::begin()
+bool ESP32SvelteKit::begin()
 {
     ESP_LOGV(SVK_TAG, "Loading settings from files system");
     ESPFS.begin(true);
+#ifdef CONFIG_RECOVERY_ENABLED
+    if (!ConfigRecovery::begin(&ESPFS, esp_reset_reason())) {
+        safeModeMB = true;
+        ESP_LOGE(SVK_TAG, "Configuration recovery failed; settings initialization blocked");
+        return false;
+    }
+    if (ConfigRecovery::restoredThisBoot()) safeModeMB = false;
+#endif
 
 #if FT_ENABLED(FT_WIFI) // 🌙
     // 🌙 Load WiFi state early so getSystemHostname() returns the configured hostname
@@ -111,8 +123,26 @@ void ESP32SvelteKit::begin()
                 response.addHeader("Content-Encoding", "gzip");
                 response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
                 // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
-                response.setContent(content, len);
-                return response.send();
+                size_t chunkSize = 512;
+                uint8_t *chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                if (!chunk) {
+                    chunkSize = 256;
+                    chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                }
+                if (!chunk) return PsychicResponse::sendServiceUnavailable(request);
+                response.sendHeaders();
+                for (size_t offset = 0; offset < len; offset += chunkSize)
+                {
+                    size_t size = len - offset < chunkSize ? len - offset : chunkSize;
+                    memcpy(chunk, content + offset, size);
+                    esp_err_t err = response.sendChunk(chunk, size);
+                    if (err != ESP_OK) {
+                        heap_caps_free(chunk);
+                        return err;
+                    }
+                }
+                heap_caps_free(chunk);
+                return response.finishChunking();
             };
             PsychicWebHandler *handler = new PsychicWebHandler();
             handler->onRequest(requestHandler);
@@ -153,12 +183,42 @@ void ESP32SvelteKit::begin()
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Credentials", "true");
 #endif
 
-    ESP_LOGV(SVK_TAG, "Starting MDNS");
-    MDNS.begin(getSystemHostname().c_str()); // 🌙 use unified hostname
-    MDNS.setInstanceName(_appName);
-    MDNS.addService("http", "tcp", 80);
-    MDNS.addService("ws", "tcp", 80);
-    MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+    String mdnsHostname = getSystemHostname();
+    mdnsHostname.toLowerCase();
+    if (safeModeMB)
+    {
+        ESP_LOGW(SVK_TAG, "Safe mode enabled; mDNS disabled until the next clean boot");
+    }
+    else if (MDNS.begin(mdnsHostname.c_str()))
+    {
+        MDNS.setInstanceName(mdnsHostname);
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addService("ws", "tcp", 80);
+        MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+        auto announceMdnsSta = []() {
+            esp_netif_t *netif = WiFi.STA.netif();
+            if (netif)
+            {
+                if (mdns_netif_action(netif, MDNS_EVENT_ENABLE_IP4) == ESP_OK)
+                    mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
+            }
+        };
+        registerMdnsStaGotIp(
+            [](auto announce) {
+                WiFi.onEvent(
+                    [announce](WiFiEvent_t, WiFiEventInfo_t) {
+                        announce();
+                    },
+                    WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+            },
+            []() { return WiFi.isConnected(); },
+            announceMdnsSta);
+        ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
+    }
+    else
+    {
+        ESP_LOGE(SVK_TAG, "mDNS failed to start for %s", mdnsHostname.c_str());
+    }
 
 #ifdef SERIAL_INFO
     Serial.printf("Running Firmware Version: %s\n", APP_VERSION);
@@ -251,6 +311,7 @@ void ESP32SvelteKit::begin()
                        ESP32SVELTEKIT_RUNNING_CORE           // Pin to application core
 #endif
     );
+    return true;
 }
 
 void ESP32SvelteKit::_loop()
@@ -268,6 +329,7 @@ void ESP32SvelteKit::_loop()
 
     while (1)
     {
+        wifi_eth_combined = false;
 #if FT_ENABLED(FT_WIFI) // 🌙
         _wifiSettingsService.loop(); // 30 seconds
         _apSettingsService.loop();   // 10 seconds
@@ -318,6 +380,10 @@ void ESP32SvelteKit::_loop()
         {
             function();
         }
+
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::loop(!safeModeMB && recoveryConnectivityHealthy(wifi_eth_combined, ap, event) && lps_all_snapshot > 0);
+#endif
 
         static int lastTime = 0;
         if (millis() - lastTime > 1000)

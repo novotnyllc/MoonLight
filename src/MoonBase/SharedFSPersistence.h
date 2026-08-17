@@ -53,10 +53,22 @@ class SharedFSPersistence {
   }
 
   void begin() {
+    // Pin assignments are a dependency of LED, audio, button, and sensor nodes.
+    // The map is alphabetically ordered, so load the foundational IO module
+    // explicitly before node managers construct their persisted drivers.
+    auto inputOutput = _modules.find("inputoutput");
+    if (inputOutput != _modules.end()) readFromFS(inputOutput->first);
+
     // Read initial state from filesystem
     for (const auto& pair : _modules) {
+      if (inputOutput != _modules.end() && pair.first == inputOutput->first) continue;
       readFromFS(pair.first);
     }
+
+    // Persisted reads deliberately suppress propagation. Publish the settled IO
+    // state once, after every pin consumer has restored its own state, so drivers
+    // initialize even when the later board-default pass is unchanged.
+    if (inputOutput != _modules.end()) inputOutput->second.module->callUpdateHandlers(inputOutput->first);
 
     // Register update handlers for modules that requested delayed writing
     for (const auto& pair : _modules) {
@@ -90,6 +102,10 @@ class SharedFSPersistence {
     if (it == _modules.end()) return;
 
     ModuleInfo& info = it->second;
+    if (!info.module->shouldLoadPersistedState()) {
+      EXT_LOGW(MB_TAG, "Using in-memory defaults for %s; leaving %s unchanged", moduleName, info.filePath.c_str());
+      return;
+    }
     File file = _fs->open(info.filePath.c_str(), "r");
 
     if (file) {
@@ -114,6 +130,7 @@ class SharedFSPersistence {
     if (it == _modules.end()) return;
 
     ModuleInfo& info = it->second;
+    if (!info.module->shouldLoadPersistedState()) return;
 
     // ADDED: Delayed write support
     if (info.delayedWriting) {
@@ -151,6 +168,7 @@ class SharedFSPersistence {
     if (it == _modules.end()) return false;
 
     ModuleInfo& info = it->second;
+    if (!info.module->shouldLoadPersistedState()) return true;
 
     // ADDED: Create directories if needed
     mkdirs(info.filePath);

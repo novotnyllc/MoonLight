@@ -12,6 +12,7 @@
 #include "PsychicWebHandler.h"
 #include "ChunkPrinter.h"
 #include <ArduinoJson.h>
+#include <esp_heap_caps.h>
 
 #if ARDUINOJSON_VERSION_MAJOR == 6
   #define ARDUINOJSON_6_COMPATIBILITY
@@ -26,6 +27,30 @@
 #endif
 
 constexpr const char *JSON_MIMETYPE = "application/json";
+
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+class PsychicJsonAllocator : public ArduinoJson::Allocator
+{
+  public:
+    void *allocate(size_t size) override
+    {
+      return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+
+    void deallocate(void *pointer) override { heap_caps_free(pointer); }
+
+    void *reallocate(void *pointer, size_t size) override
+    {
+      return heap_caps_realloc_prefer(pointer, size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+
+    static PsychicJsonAllocator *instance()
+    {
+      static PsychicJsonAllocator allocator;
+      return &allocator;
+    }
+};
+#endif
 
 /*
  * Json Response

@@ -35,10 +35,11 @@ static Node* currentNode() {
     if (m.task == h) return m.node;
   return gNode;
 }
-static void registerNodeForTask(TaskHandle_t task, Node* node) {
+static bool registerNodeForTask(TaskHandle_t task, Node* node) {
   for (auto& m : gTaskNodeMap)
-    if (m.task == nullptr) { m.task = task; m.node = node; return; }
+    if (m.task == nullptr) { m.task = task; m.node = node; return true; }
   EXT_LOGE(MB_TAG, "gTaskNodeMap full");
+  return false;
 }
 static void unregisterNodeForTask(TaskHandle_t task) {
   for (auto& m : gTaskNodeMap)
@@ -449,8 +450,8 @@ void LiveScriptNode::execute() {
     if (exec && exec->__run_handle_index != 9999) {
       TaskHandle_t h = *runningPrograms.getHandleByIndex(exec->__run_handle_index);
       if (h) {
-        registerNodeForTask(h, this);
-        taskStarted = true;
+        taskStarted = registerNodeForTask(h, this);
+        if (!taskStarted) scriptRuntime.kill(animation.c_str());
       } else {
         EXT_LOGE(MB_TAG, "%s: task handle NULL after executeAsTask — task creation likely failed (low heap?)", animation.c_str());
         exec->_isRunning = false;  // prevent freeSync crash later
@@ -477,11 +478,10 @@ void LiveScriptNode::execute() {
 void LiveScriptNode::kill() {
   EXT_LOGV(MB_TAG, "%s", animation.c_str());
   hasLoopTask = false;  // 🌙 task is being killed; loop() must not signal WaitAnimationSync
-  // 🌙 Unregister task → node mapping before the task is deleted.
+  TaskHandle_t taskToUnregister = nullptr;
   Executable* exec = scriptRuntime.findExecutable(animation.c_str());
   if (exec && exec->__run_handle_index != 9999) {
-    TaskHandle_t h = *runningPrograms.getHandleByIndex(exec->__run_handle_index);
-    if (h) unregisterNodeForTask(h);
+    taskToUnregister = *runningPrograms.getHandleByIndex(exec->__run_handle_index);
   }
   // 🌙 Guard against ESPLiveScript freeSync() crash: if getMask()==0 but _isRunning
   // is true, xEventGroupSync asserts (uxBitsToWaitFor != 0). Force _isRunning false
@@ -491,6 +491,9 @@ void LiveScriptNode::kill() {
     exec->_isRunning = false;
   }
   scriptRuntime.kill(animation.c_str());
+  // Keep task-to-node lookup valid through the runtime's synchronous cleanup;
+  // remove it only after kill() has returned and the task can no longer call externals.
+  if (taskToUnregister) unregisterNodeForTask(taskToUnregister);
 }
 
 void LiveScriptNode::free() {
@@ -504,6 +507,36 @@ void LiveScriptNode::killAndDelete() {
   // scriptRuntime.free(animation.c_str());
   scriptRuntime.deleteExe(animation.c_str());
 };
+
+bool LiveScriptNode::quiesceTimedOutTasks() {
+  LiveScriptNode* pending[MAX_LIVE_SCRIPTS] = {};
+  uint8_t pendingCount = 0;
+  for (const auto& mapping : gTaskNodeMap) {
+    if (!mapping.node || !mapping.node->isLiveScriptNode()) continue;
+    LiveScriptNode* node = static_cast<LiveScriptNode*>(mapping.node);
+    bool alreadyPending = false;
+    for (uint8_t i = 0; i < pendingCount; ++i) alreadyPending = alreadyPending || pending[i] == node;
+    if (!alreadyPending && pendingCount < MAX_LIVE_SCRIPTS) pending[pendingCount++] = node;
+  }
+
+  for (uint8_t i = 0; i < pendingCount; ++i) {
+    pending[i]->needsExecute = false;
+    pending[i]->needsCompile = false;
+    pending[i]->kill();
+  }
+
+  while (xSemaphoreTake(WaitAnimationSync, 0) == pdTRUE) {}
+  while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
+
+  for (uint8_t i = 0; i < pendingCount; ++i) {
+    Executable* exec = scriptRuntime.findExecutable(pending[i]->animation.c_str());
+    if ((exec && exec->_isRunning) || pending[i]->hasLoopTask || pending[i]->needsExecute || pending[i]->needsCompile) return false;
+  }
+  for (const auto& mapping : gTaskNodeMap) {
+    if (mapping.task || mapping.node) return false;
+  }
+  return true;
+}
 
 void LiveScriptNode::getScriptsJson(JsonArray scripts) {
   for (Executable& exec : scriptRuntime._scExecutables) {

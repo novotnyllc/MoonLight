@@ -13,6 +13,8 @@
 
 #if FT_MOONLIGHT
 
+#include <RecoveryPolicy.h>
+
 // using the new FastLED channel api
 // https://github.com/FastLED/FastLED/blob/master/src/fl/channels/README.md
 
@@ -44,6 +46,8 @@ class FastLEDDriver : public DriverNode {
   #endif
     addControl(engine, "engine", "text", 0, 32, true);  // the resolved engine based on affinity
 
+    reserveRmtForPdm();
+
     addControl(temperature, "temperature", "select");
     addControlValue("Uncorrected");
     addControlValue("Candle");
@@ -61,6 +65,7 @@ class FastLEDDriver : public DriverNode {
     addControl(status, "status", "text", 0, 32, true);
 
     ioUpdateHandler = moduleIO->addUpdateHandler([this](const String& originId) {
+      if (reserveRmtForPdm()) layerP.requestMapPhysical = true;
       uint8_t nrOfPins = MIN(layerP.nrOfLedPins, layerP.nrOfAssignedPins);
 
       EXT_LOGD(ML_TAG, "recreate channels and configs %s %d", originId.c_str(), nrOfPins);
@@ -84,13 +89,41 @@ class FastLEDDriver : public DriverNode {
       if (engine != this->engine.c_str()) {
         EXT_LOGD(ML_TAG, "Resolved engine %s %s → %s", ch.name().c_str(), this->engine.c_str(), engine.c_str());
         updateControl("engine", engine.c_str());
-        moduleNodes->requestUIUpdate = true;
+        moduleNodes->queueSnapshot(name());
       }
     });
   }
 
   fl::EOrder rgbOrder = GRB;
   fl::ChannelOptions options = fl::ChannelOptions();
+  bool pdmForcesRmt = false;
+
+  void applyEffectiveAffinity() {
+    switch (recoveryEffectiveAffinity(affinity, pdmForcesRmt)) {
+    case 0: options.mAffinity = ""; break;
+    case 1: options.mAffinity = "RMT"; break;
+    case 2: options.mAffinity = "I2S"; break;
+    case 3: options.mAffinity = "SPI"; break;
+    case 4: options.mAffinity = "PARLIO"; break;
+    }
+  }
+
+  bool reserveRmtForPdm() {
+    bool hasPdmData = false;
+    bool hasPdmClock = false;
+    moduleIO->read([&](ModuleState& state) {
+      for (JsonObject pinObject : state.data["pins"].as<JsonArray>()) {
+        uint8_t usage = pinObject["usage"];
+        hasPdmData = hasPdmData || usage == pin_I2S_SD;
+        hasPdmClock = hasPdmClock || usage == pin_I2S_WS;
+      }
+    }, "FastLEDDriver");
+    bool shouldForceRmt = hasPdmData && hasPdmClock;
+    bool changed = shouldForceRmt != pdmForcesRmt;
+    pdmForcesRmt = shouldForceRmt;
+    applyEffectiveAffinity();
+    return changed;
+  }
 
   void onUpdate(const JsonObject& control) override {
     DriverNode::onUpdate(control);  // !!
@@ -169,23 +202,7 @@ class FastLEDDriver : public DriverNode {
     }
 
     else if (control["name"] == "affinity") {
-      switch (control["value"].as<uint8_t>()) {
-      case 0:  // auto
-        options.mAffinity = "";
-        break;
-      case 1:
-        options.mAffinity = "RMT";
-        break;
-      case 2:
-        options.mAffinity = "I2S";
-        break;
-      case 3:
-        options.mAffinity = "SPI";
-        break;
-      case 4:
-        options.mAffinity = "PARLIO";
-        break;
-      }
+      applyEffectiveAffinity();
       // FastLED.setExclusiveDriver(options.mAffinity.c_str());
     }
 
@@ -226,8 +243,19 @@ class FastLEDDriver : public DriverNode {
   }
 
   uint16_t savedMaxPower = UINT16_MAX;
+  uint32_t lastInitRetry = 0;
   void loop() override {
     // DriverNode::loop(); // no need to call this as FastLED is not using ledsDriver LUT tables ...
+
+    if (recoveryShouldRetryFastLedInitialization(FastLED.count(), layerP.lights.header.nrOfLights, layerP.nrOfLedPins)) {
+      uint32_t now = millis();
+      if ((uint32_t)(now - lastInitRetry) >= 1000) {
+        lastInitRetry = now;
+        layerP.requestMapPhysical.store(true);
+        EXT_LOGW(ML_TAG, "FastLED has no channels for %u lights on %u pins; retrying physical map", layerP.lights.header.nrOfLights, layerP.nrOfLedPins);
+      }
+      return;
+    }
 
     if (FastLED.count()) {
       if (FastLED.getBrightness() != layerP.lights.header.brightness) {
@@ -264,7 +292,7 @@ class FastLEDDriver : public DriverNode {
     if (layerP.pass == 1 && !layerP.monitorPass) {
       uint8_t nrOfPins = MIN(layerP.nrOfLedPins, layerP.nrOfAssignedPins);
 
-      if (affinity == 1 && nrOfPins > 4) nrOfPins = 4;  // FastLED RMT supports max 4 pins!, what about SPI?
+      if (recoveryEffectiveAffinity(affinity, pdmForcesRmt) == 1 && nrOfPins > 4) nrOfPins = 4;  // FastLED RMT supports max 4 pins!, what about SPI?
 
       if (nrOfPins == 0) return;
 
@@ -295,12 +323,13 @@ class FastLEDDriver : public DriverNode {
       version.format("4.0 pre release! %s", FASTLED_BUILD);  // version.format("%s %s", TOSTRING(FASTLED_VERSION), FASTLED_BUILD);
       updateControl("version", version);
       updateControl("status", statusString.c_str());
-      moduleNodes->requestUIUpdate = true;
+      moduleNodes->queueSnapshot(name());
 
       fl::ChipsetTimingConfig timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
       CRGB* leds = (CRGB*)layerP.lights.channelsD;
       uint16_t startLed = 0;
 
+      channels.clear();
       FastLED.clear(ClearFlags::CHANNELS);
       // FastLED.reset(ResetFlags::CHANNELS);
 
@@ -349,6 +378,7 @@ class FastLEDDriver : public DriverNode {
     auto& events = FastLED.channelEvents();
     events.onChannelCreated.clear();
     events.onChannelEnqueued.clear();
+    channels.clear();
     FastLED.clear(ClearFlags::CHANNELS);
     // FastLED.reset(ResetFlags::CHANNELS);
 

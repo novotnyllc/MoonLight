@@ -103,7 +103,7 @@ class NetworkOutDriver : public DriverNode {
         setupE131Header();
       }
       updateControl("port", port);
-      moduleNodes->requestUIUpdate = true;
+      moduleNodes->queueSnapshot(name());
       lastStatusCode = 255;  // force status refresh on next send
     }
 
@@ -149,7 +149,7 @@ class NetworkOutDriver : public DriverNode {
     updateControl("usedChannels", usedChannelsPerUniverse);
     updateControl("totalUniverses", totalUniverses);
     updateControl("totalChannels", totalChannels);
-    moduleNodes->requestUIUpdate = true;
+    moduleNodes->queueSnapshot(name());
 
     EXT_LOGD(ML_TAG, "c/u:%d #u:%d #c%d (%d)", usedChannelsPerUniverse, totalUniverses, totalChannels, totalUniverses * usedChannelsPerUniverse);
   }

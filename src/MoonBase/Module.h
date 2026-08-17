@@ -90,11 +90,21 @@ class Module : public StatefulService<ModuleState> {
   /// Set to true to push current state to UI on next loop20ms() cycle.
   bool requestUIUpdate = false;
 
+  /// Queue a latest-wins outbound state snapshot for the next loop tick.
+  void queueSnapshot(const String& originId);
+
+  /// Register an outbound snapshot transport. Mutations use ordinary update handlers.
+  void addSnapshotHandler(StateUpdateCallback callback);
+
   Module(const char* moduleName, PsychicHttpServer* server, ESP32SvelteKit* sveltekit);
 
   /// Registers HTTP/WS endpoints and initializes state from definition or persisted file.
   // any Module that overrides begin() must continue to call Module::begin() (e.g., at the start of its own begin()
   virtual void begin();
+
+  /// Return false to keep the module's in-memory defaults while leaving its
+  /// persisted file unchanged and read-only (for example, in safe mode).
+  virtual bool shouldLoadPersistedState() const { return true; }
 
   /// Called every SvelteKit loop iteration (fastest). Override for high-frequency polling.
   // run in sveltekit task
@@ -142,6 +152,12 @@ class Module : public StatefulService<ModuleState> {
   /// HTTP server for registering REST endpoints. Protected so subclasses (e.g. NodeManager) can register additional routes.
   PsychicHttpServer* _server;
   ESP32SvelteKit* _sveltekit;
+
+ private:
+  Char<32> snapshotOrigin;
+  bool snapshotOriginMixed = false;
+  std::vector<StateUpdateCallback> snapshotHandlers;
+  portMUX_TYPE snapshotMux = portMUX_INITIALIZER_UNLOCKED;
 };
 
 #endif

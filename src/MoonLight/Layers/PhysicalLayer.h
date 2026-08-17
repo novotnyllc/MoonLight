@@ -14,8 +14,10 @@
 #if FT_MOONLIGHT
 
   #include <vector>
+  #include <atomic>
 
   #include "FastLED.h"
+  #include "LayerMappingMutex.h"
   #include "MoonBase/utilities/PlatformFunctions.h"
   #include "LightsHeader.h"  // pure types: nrOfLights_t, LightsHeader, Lights — no ESP32 deps
 
@@ -49,8 +51,8 @@ class PhysicalLayer {
   // pass 1 so the virtual mapping table stays in sync with the physical layout.
   // Callers should set requestMapPhysical when the physical light count or
   // positions change, and requestMapVirtual alone when only modifiers change.
-  uint8_t requestMapPhysical = false;
-  uint8_t requestMapVirtual = false;
+  std::atomic<bool> requestMapPhysical{false};
+  std::atomic<bool> requestMapVirtual{false};
 
   // Driver/layout/modifier nodes attached directly to this physical layer.
   std::vector<Node*, VectorRAMAllocator<Node*>> nodes;
@@ -65,6 +67,10 @@ class PhysicalLayer {
   SemaphoreHandle_t effectsMutex = xSemaphoreCreateMutex();
   SemaphoreHandle_t driversMutex = xSemaphoreCreateMutex();
 
+  // Owns VirtualLayer topology and mapping/virtual-channel buffer lifetimes.
+  // Recursive because LayerManager operations call ensureLayer() while already holding it.
+  LayerMappingMutex mappingMutex;
+
   PhysicalLayer();
   ~PhysicalLayer();
 
@@ -78,22 +84,26 @@ class PhysicalLayer {
   void setup();
 
   // Run one effect frame across all virtual layers (called from effectTask, Core 0).
+  // Caller owns a LayerMappingReadGuard for the complete frame lifetime.
   // Effects write to per-layer virtualChannels; compositeLayers() is called from main.cpp
   // after channelsDFreeSemaphore confirms the driver has finished reading channelsD.
   void loop();
 
-  // Composite all virtual layers into channelsD.
+  // Composite all virtual layers into channelsD under the caller's frame read guard.
   // Called from effectTask under swapMutex after channelsDFreeSemaphore confirms the driver
   // has finished reading channelsD. Zeroes the buffer first so additive blending starts clean.
   void compositeLayers();
 
-  // Run 20 ms periodic updates across all virtual layers (called from effectTask(), Core 0).
+  // Run 20 ms periodic updates across all virtual layers under the caller's frame read guard.
   void loop20ms();
 
-  // Run one driver frame: process pending layout mapping, then loop all driver nodes (Core 1).
+  // Process pending layout/remap work under exclusive ownership.
+  void processMappings();
+
+  // Run one stable driver frame under the caller's LayerMappingReadGuard (Core 1).
   void loopDrivers();
 
-  // Run 20 ms periodic driver updates (called from driverTask(), Core 1).
+  // Run 20 ms periodic driver updates under the caller's driver-frame read guard.
   void loop20msDrivers();
 
   // Execute a full layout mapping pass: calls onLayoutPre → onLayout (per node) → onLayoutPost.

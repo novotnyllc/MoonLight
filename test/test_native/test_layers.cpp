@@ -17,6 +17,7 @@
 
 #include "doctest.h"
 
+#include <atomic>
 #include <cstddef>  // offsetof
 
 // Pure-type headers — no ESP32 deps
@@ -520,6 +521,20 @@ TEST_CASE("loopDrivers flag coupling: requestMapPhysical triggers requestMapVirt
     CHECK_EQ(requestMapPhysical, (uint8_t)false);
     CHECK_EQ(requestMapVirtual,  (uint8_t)false);
   }
+}
+
+TEST_CASE("mapping requests raised during a pass survive for the next iteration") {
+  std::atomic<bool> physical{true};
+  std::atomic<bool> virtualMap{false};
+
+  REQUIRE(physical.exchange(false));
+  physical.store(true);  // another task requests a remap while pass 1 is running
+  virtualMap.store(true);
+
+  CHECK(physical.load());
+  CHECK(virtualMap.exchange(false));
+  virtualMap.store(true);  // another task requests a remap while pass 2 is running
+  CHECK(virtualMap.load());
 }
 
 // ============================================================

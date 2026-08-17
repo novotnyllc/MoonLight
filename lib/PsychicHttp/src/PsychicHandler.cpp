@@ -8,14 +8,26 @@ PsychicHandler::PsychicHandler() :
   _method(DIGEST_AUTH),
   _realm(""),
   _authFailMsg(""),
-  _subprotocol("")
+  _subprotocol(""),
+  _clientsMutex(xSemaphoreCreateRecursiveMutex())
   {}
 
 PsychicHandler::~PsychicHandler() {
   // actual PsychicClient deletion handled by PsychicServer
   // for (PsychicClient *client : _clients)
   //   delete(client);
+  lockClients();
   _clients.clear();
+  unlockClients();
+  if (_clientsMutex) vSemaphoreDelete(_clientsMutex);
+}
+
+void PsychicHandler::lockClients() {
+  if (_clientsMutex) xSemaphoreTakeRecursive(_clientsMutex, portMAX_DELAY);
+}
+
+void PsychicHandler::unlockClients() {
+  if (_clientsMutex) xSemaphoreGiveRecursive(_clientsMutex);
 }
 
 PsychicHandler* PsychicHandler::setFilter(PsychicRequestFilterFunction fn) {
@@ -76,25 +88,28 @@ void PsychicHandler::checkForClosedClient(PsychicClient *client)
 }
 
 void PsychicHandler::addClient(PsychicClient *client) {
+  lockClients();
   _clients.push_back(client);
+  unlockClients();
 }
 
 void PsychicHandler::removeClient(PsychicClient *client) {
+  lockClients();
   _clients.remove(client);
+  unlockClients();
 }
 
 PsychicClient * PsychicHandler::getClient(int socket)
 {
-  //make sure the server has it too.
-  if (!_server->hasClient(socket))
-    return NULL;
-
-  //what about us?
+  lockClients();
   for (PsychicClient *client : _clients)
-    if (client->socket() == socket)
+    if (client->socket() == socket) {
+      unlockClients();
       return client;
+    }
 
   //nothing found.
+  unlockClients();
   return NULL;
 }
 
@@ -106,6 +121,9 @@ bool PsychicHandler::hasClient(PsychicClient *socket) {
   return PsychicHandler::getClient(socket) != NULL;
 }
 
-const std::list<PsychicClient*>& PsychicHandler::getClientList() {
-  return _clients;
+int PsychicHandler::count() {
+  lockClients();
+  int clients = _clients.size();
+  unlockClients();
+  return clients;
 }

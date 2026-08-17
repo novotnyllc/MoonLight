@@ -13,14 +13,33 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
+#include <functional>
+
+#include "MdnsRegistrationPolicy.h"
 #include "MoonBase/utilities/BoardNames.h"
 #include "MoonBase/utilities/Char.h"
 #include "MoonBase/utilities/Coord3D.h"
 #include "MoonBase/utilities/PureFunctions.h"
+#include "RecoveryPolicy.h"
 
 // ============================================================
 // Tests
 // ============================================================
+
+TEST_CASE("late mDNS registration announces immediately and keeps GOT_IP handler") {
+  std::function<void()> gotIpHandler;
+  int announcements = 0;
+
+  registerMdnsStaGotIp(
+      [&](auto handler) { gotIpHandler = handler; },
+      []() { return true; },
+      [&]() { ++announcements; });
+
+  CHECK_EQ(announcements, 1);
+  REQUIRE(gotIpHandler);
+  gotIpHandler();
+  CHECK_EQ(announcements, 2);
+}
 
 TEST_CASE("gcd") {
   CHECK_EQ(gcd(12, 18), 6);
@@ -205,6 +224,109 @@ TEST_CASE("contains") {
   CHECK_FALSE(contains("hello", "world"));
   CHECK_FALSE(contains(nullptr, "test"));
   CHECK_FALSE(contains("test", nullptr));
+}
+
+TEST_CASE("protected recovery paths") {
+  CHECK(isProtectedRecoveryPath("/.config-recovery"));
+  CHECK(isProtectedRecoveryPath("/.config-recovery/slot0/config/effects.json"));
+  CHECK(isProtectedRecoveryPath(".config-recovery/active"));
+  CHECK(isProtectedRecoveryPath("/foo/../.config-recovery/slot1"));
+  CHECK(isProtectedRecoveryPath("/rest/file/.config-recovery/active"));
+  CHECK_FALSE(isProtectedRecoveryPath("/.config"));
+  CHECK_FALSE(isProtectedRecoveryPath("/livescripts/example.sc"));
+  CHECK_FALSE(isProtectedRecoveryPath("/.config-recovery-backup"));
+  CHECK_FALSE(isProtectedRecoveryPath("/foo/.config-recovery.json"));
+  CHECK_FALSE(isProtectedRecoveryPath(nullptr));
+}
+
+TEST_CASE("recovery promotion requires current connectivity") {
+  CHECK_FALSE(recoveryConnectivityHealthy(false, true, false));
+  CHECK(recoveryConnectivityHealthy(false, true, true));
+  CHECK(recoveryConnectivityHealthy(true, false, false));
+  CHECK_FALSE(recoveryConnectivityHealthy(false, false, false));
+}
+
+TEST_CASE("recovery sound health expires without fresh samples") {
+  CHECK(recoverySoundSampleFresh(true, true, 5999, 1000));
+  CHECK_FALSE(recoverySoundSampleFresh(true, true, 6000, 1000));
+  CHECK_FALSE(recoverySoundSampleFresh(true, false, 1000, 1000));
+  CHECK(recoverySoundSampleFresh(false, false, 6000, 1000));
+  CHECK(recoverySoundSampleFresh(true, true, 2, UINT32_MAX - 1000));
+
+  RecoverySoundState sharedState;
+  sharedState.report(true, 1000);
+  CHECK(sharedState.fresh(true, 5999));
+  sharedState.report(false, 6000);
+  CHECK_FALSE(sharedState.fresh(true, 6000));
+}
+
+TEST_CASE("recovery restores invalid live state only on failure resets") {
+  CHECK(recoveryShouldRestore(true, true, false, false));
+  CHECK(recoveryShouldRestore(true, true, true, false));
+  CHECK_FALSE(recoveryShouldRestore(true, true, true, true));
+  CHECK_FALSE(recoveryShouldRestore(true, false, false, false));
+  CHECK_FALSE(recoveryShouldRestore(false, true, false, false));
+}
+
+TEST_CASE("recovery slots require a manifest and both readable roots") {
+  CHECK(recoverySlotReady(true, true, true));
+  CHECK_FALSE(recoverySlotReady(false, true, true));
+  CHECK_FALSE(recoverySlotReady(true, false, true));
+  CHECK_FALSE(recoverySlotReady(true, true, false));
+}
+
+TEST_CASE("PDM keeps requested affinity persistent while forcing effective RMT") {
+  uint8_t requestedAffinity = 3;
+  CHECK_EQ(recoveryEffectiveAffinity(requestedAffinity, true), 1);
+  uint8_t persistedAffinity = requestedAffinity;
+  CHECK_EQ(persistedAffinity, 3);
+  CHECK_EQ(recoveryEffectiveAffinity(persistedAffinity, true), 1);
+  CHECK_EQ(recoveryEffectiveAffinity(persistedAffinity, false), 3);
+}
+
+TEST_CASE("configured FastLED output retries only when channels are missing") {
+  CHECK(recoveryShouldRetryFastLedInitialization(0, 95, 1));
+  CHECK_FALSE(recoveryShouldRetryFastLedInitialization(1, 95, 1));
+  CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 0, 1));
+  CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 95, 0));
+}
+
+TEST_CASE("legacy recovery upgrade never adopts live state after a failure") {
+  CHECK(recoveryMayUpgradeLegacySlot(false, true, true, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(true, true, true, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, false, true, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, true, false, true));
+  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, true, true, false));
+}
+
+TEST_CASE("coalesced snapshots exclude an origin only when every update shares it") {
+  CHECK_FALSE(coalescedSnapshotOriginsMixed(false, false, false));
+  CHECK_FALSE(coalescedSnapshotOriginsMixed(true, false, true));
+  CHECK(coalescedSnapshotOriginsMixed(true, false, false));
+  CHECK(coalescedSnapshotOriginsMixed(true, true, true));
+}
+
+TEST_CASE("layer views reject missing slots and layer iteration survives holes") {
+  CHECK(usableLayerView(0, 16, false));
+  CHECK(usableLayerView(3, 16, true));
+  CHECK_FALSE(usableLayerView(3, 16, false));
+  CHECK_FALSE(usableLayerView(17, 16, true));
+
+  int first = 1;
+  int third = 3;
+  std::vector<int*> slots{&first, nullptr, &third};
+  std::vector<int> visited;
+  forEachPresentPointer(slots, [&](int* value) { visited.push_back(*value); });
+  REQUIRE_EQ(visited.size(), 2u);
+  CHECK_EQ(visited[0], 1);
+  CHECK_EQ(visited[1], 3);
+}
+
+TEST_CASE("channel selections enforce grouped pixel and ungrouped channel bounds") {
+  CHECK(channelSelectionInBounds(true, 94, 95, 285));
+  CHECK_FALSE(channelSelectionInBounds(true, 95, 95, 285));
+  CHECK(channelSelectionInBounds(false, 284, 95, 285));
+  CHECK_FALSE(channelSelectionInBounds(false, 285, 95, 285));
 }
 
 // ============================================================

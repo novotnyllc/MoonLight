@@ -101,7 +101,11 @@ void VirtualLayer::loop() {
 
 void VirtualLayer::loop20ms() {
   for (Node* node : nodes) {
-    if (node->on) node->loop20ms();
+    if (node->on) {
+      xSemaphoreTake(*node->layerMutex, portMAX_DELAY);
+      node->loop20ms();
+      xSemaphoreGive(*node->layerMutex);
+    }
   }
 }
 

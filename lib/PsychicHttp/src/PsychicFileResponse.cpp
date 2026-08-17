@@ -1,6 +1,9 @@
 #include "PsychicFileResponse.h"
 #include "PsychicResponse.h"
 #include "PsychicRequest.h"
+#include <esp_heap_caps.h>
+
+static constexpr size_t FILE_INTERNAL_CHUNK_SIZE = 512;
 
 
 PsychicFileResponse::PsychicFileResponse(PsychicRequest *request, FS &fs, const String& path, const String& contentType, bool download)
@@ -101,14 +104,13 @@ esp_err_t PsychicFileResponse::send()
 
   //just send small files directly
   size_t size = getContentLength();
-  if (size < FILE_CHUNK_SIZE)
+  if (size < FILE_INTERNAL_CHUNK_SIZE)
   {
-    uint8_t *buffer = (uint8_t *)malloc(size);
+    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (buffer == NULL)
     {
       /* Respond with 500 Internal Server Error */
-      httpd_resp_send_err(this->_request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate memory.");
-      return ESP_FAIL;
+      return sendServiceUnavailable(this->_request);
     }
 
     size_t readSize = _content.readBytes((char *)buffer, size);
@@ -116,17 +118,21 @@ esp_err_t PsychicFileResponse::send()
     this->setContent(buffer, readSize);
     err = PsychicResponse::send();
     
-    free(buffer);
+    heap_caps_free(buffer);
   }
   else
   {
     /* Retrieve the pointer to scratch buffer for temporary storage */
-    char *chunk = (char *)malloc(FILE_CHUNK_SIZE);
+    size_t chunkSize = FILE_INTERNAL_CHUNK_SIZE;
+    char *chunk = static_cast<char *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (chunk == NULL)
     {
-      /* Respond with 500 Internal Server Error */
-      httpd_resp_send_err(this->_request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate memory.");
-      return ESP_FAIL;
+      chunkSize = 256;
+      chunk = static_cast<char *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (chunk == NULL)
+    {
+      return sendServiceUnavailable(this->_request);
     }
 
     this->sendHeaders();
@@ -134,7 +140,7 @@ esp_err_t PsychicFileResponse::send()
     size_t chunksize;
     do {
         /* Read file in chunks into the scratch buffer */
-        chunksize = _content.readBytes(chunk, FILE_CHUNK_SIZE);
+        chunksize = _content.readBytes(chunk, chunkSize);
         if (chunksize > 0)
         {
           err = this->sendChunk((uint8_t *)chunk, chunksize);
@@ -146,7 +152,7 @@ esp_err_t PsychicFileResponse::send()
     } while (chunksize != 0);
 
     //keep track of our memory
-    free(chunk);
+    heap_caps_free(chunk);
 
     if (err == ESP_OK)
     {

@@ -21,9 +21,15 @@
 // ---------------------------------------------------------------------------
 
 #include <ArduinoJson.h>
+#include <chrono>
 #include <functional>
+#include <future>
+#include <string>
+#include <thread>
 #include <vector>
 #include <cstring>
+
+#include "MoonLight/Layers/LayerMappingMutex.h"
 
 // Logging macros — no-ops in native tests
 #ifndef EXT_LOGD
@@ -46,10 +52,13 @@ struct Node {
   void requestMappings() {}
 };
 
-// UpdatedItem stub (used by handleUpdate, not tested here)
+// UpdatedItem stub
 struct UpdatedItem {
-  struct Parent { const char* operator[](int) const { return ""; } } parent;
-  const char* name = "";
+  struct Parent {
+    std::string values[2];
+    const std::string& operator[](int index) const { return values[index]; }
+  } parent;
+  std::string name;
   JsonVariantConst value;
 };
 
@@ -68,6 +77,7 @@ struct PhysicalLayer {
   std::vector<VirtualLayer*> layers;
   int activeLayerCount = 0;
   bool requestMapVirtual = false;
+  LayerMappingMutex mappingMutex;
 
   PhysicalLayer() {
     layers.resize(8, nullptr);
@@ -115,6 +125,206 @@ struct ModuleState {
 // ---------------------------------------------------------------------------
 #include "MoonLight/Layers/LayerManager.h"
 
+TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
+  layerP.reset();
+  VirtualLayer* layer1 = layerP.ensureLayer(1);
+
+  ModuleState state;
+  std::vector<Node*, VectorRAMAllocator<Node*>>* selectedNodes = &layerP.layers[0]->nodes;
+  bool requestUIUpdate = false;
+  LayerManager manager;
+  manager.init(state, selectedNodes, requestUIUpdate);
+
+  std::promise<void> readerLocked;
+  std::promise<void> releaseReader;
+  std::shared_future<void> releaseFuture(releaseReader.get_future());
+  std::thread reader([&]() {
+    LayerMappingReadGuard guard(layerP.mappingMutex);
+    readerLocked.set_value();
+    releaseFuture.wait();
+  });
+  readerLocked.get_future().wait();
+
+  std::promise<void> reconfigured;
+  std::future<void> reconfiguredFuture = reconfigured.get_future();
+  std::thread writer([&]() {
+    manager.prepareForPresetLoad();
+    reconfigured.set_value();
+  });
+
+  CHECK(reconfiguredFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  CHECK(layerP.layers[1] == layer1);
+
+  releaseReader.set_value();
+  reader.join();
+  writer.join();
+  CHECK(layerP.layers[1] == nullptr);
+}
+
+TEST_CASE("shared lifetime readers overlap while writer waits and excludes new readers") {
+  layerP.reset();
+  std::atomic<int> activeReaders{0};
+  std::atomic<bool> deleted{false};
+  std::promise<void> releaseReaders;
+  std::shared_future<void> releaseReadersFuture(releaseReaders.get_future());
+
+  auto readerBody = [&]() {
+    LayerMappingReadGuard guard(layerP.mappingMutex);
+    CHECK_FALSE(deleted.load());
+    activeReaders.fetch_add(1);
+    releaseReadersFuture.wait();
+    activeReaders.fetch_sub(1);
+  };
+  auto reader1 = std::async(std::launch::async, readerBody);
+  auto reader2 = std::async(std::launch::async, readerBody);
+  while (activeReaders.load() != 2) std::this_thread::yield();
+  CHECK_EQ(activeReaders.load(), 2);
+
+  std::promise<void> writerEntered;
+  std::future<void> writerEnteredFuture = writerEntered.get_future();
+  std::promise<void> releaseWriter;
+  std::shared_future<void> releaseWriterFuture(releaseWriter.get_future());
+  auto writer = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    deleted.store(true);
+    writerEntered.set_value();
+    releaseWriterFuture.wait();
+  });
+  while (layerP.mappingMutex.waitingWriterCountForTest() == 0) std::this_thread::yield();
+
+  std::promise<void> lateReaderEntered;
+  auto lateReader = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard guard(layerP.mappingMutex);
+    lateReaderEntered.set_value();
+    CHECK(deleted.load());
+  });
+  auto lateReaderFuture = lateReaderEntered.get_future();
+  CHECK(lateReaderFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  CHECK(writerEnteredFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+  releaseReaders.set_value();
+  CHECK(writerEnteredFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(lateReaderFuture.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  releaseWriter.set_value();
+
+  CHECK(lateReaderFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  reader1.get();
+  reader2.get();
+  writer.get();
+  lateReader.get();
+}
+
+TEST_CASE("effect frame keeps exported buffer alive through async script and composite") {
+  layerP.reset();
+  int* exportedBuffer = new int(0);
+  std::atomic<int> compositeValue{0};
+  std::atomic<bool> deleted{false};
+  std::promise<void> frameEntered;
+  std::promise<void> runScript;
+  std::shared_future<void> runScriptFuture(runScript.get_future());
+
+  auto script = std::async(std::launch::async, [&]() {
+    runScriptFuture.wait();
+    *exportedBuffer = 42;
+  });
+  auto frame = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard frameGuard(layerP.mappingMutex);
+    frameEntered.set_value();
+    script.get();
+    compositeValue.store(*exportedBuffer);
+  });
+  frameEntered.get_future().wait();
+
+  auto writer = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    delete exportedBuffer;
+    exportedBuffer = nullptr;
+    deleted.store(true);
+  });
+  while (layerP.mappingMutex.waitingWriterCountForTest() == 0) std::this_thread::yield();
+  CHECK(writer.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+  runScript.set_value();
+  CHECK(frame.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK_EQ(compositeValue.load(), 42);
+  CHECK(writer.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(deleted.load());
+}
+
+TEST_CASE("monitor reader keeps mapped buffer alive until its read completes") {
+  layerP.reset();
+  int* monitorBuffer = new int(95);
+  std::promise<void> monitorEntered;
+  std::promise<void> releaseSnapshot;
+  std::shared_future<void> releaseSnapshotFuture(releaseSnapshot.get_future());
+  std::promise<void> snapshotComplete;
+  std::future<void> snapshotCompleteFuture = snapshotComplete.get_future();
+  std::promise<void> releaseNetwork;
+  std::shared_future<void> releaseNetworkFuture(releaseNetwork.get_future());
+
+  auto monitor = std::async(std::launch::async, [&]() {
+    int snapshot = 0;
+    {
+      LayerMappingReadGuard guard(layerP.mappingMutex);
+      monitorEntered.set_value();
+      releaseSnapshotFuture.wait();
+      snapshot = *monitorBuffer;
+    }
+    snapshotComplete.set_value();
+    releaseNetworkFuture.wait();  // network emission is outside lifetime ownership
+    CHECK_EQ(snapshot, 95);
+  });
+  monitorEntered.get_future().wait();
+
+  auto remap = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    delete monitorBuffer;
+    monitorBuffer = nullptr;
+  });
+  CHECK(remap.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  releaseSnapshot.set_value();
+  CHECK(snapshotCompleteFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(remap.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(monitor.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  releaseNetwork.set_value();
+  CHECK(monitor.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+}
+
+TEST_CASE("stuck script is quiesced before frame reader releases to writer") {
+  layerP.reset();
+  std::atomic<bool> scriptRunning{true};
+  std::atomic<bool> scriptSchedulable{true};
+  std::atomic<bool> writerObservedQuiesced{false};
+  std::promise<void> frameEntered;
+  std::promise<void> triggerTimeout;
+  std::shared_future<void> timeoutFuture(triggerTimeout.get_future());
+
+  auto frame = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard frameGuard(layerP.mappingMutex);
+    frameEntered.set_value();
+    timeoutFuture.wait();
+    scriptSchedulable.store(false);
+    scriptRunning.store(false);  // synchronous runtime kill has returned
+  });
+  frameEntered.get_future().wait();
+
+  auto writer = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    writerObservedQuiesced.store(!scriptRunning.load() && !scriptSchedulable.load());
+  });
+  while (layerP.mappingMutex.waitingWriterCountForTest() == 0) std::this_thread::yield();
+  CHECK(writer.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+  triggerTimeout.set_value();
+  CHECK(frame.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(writer.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(writerObservedQuiesced.load());
+
+  int futureSchedules = 0;
+  if (scriptSchedulable.load()) ++futureSchedules;
+  CHECK_EQ(futureSchedules, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -151,6 +361,79 @@ struct Fixture {
     state.data["nodes"].to<JsonArray>();
   }
 };
+
+static UpdatedItem updateFrom(JsonDocument& doc, const char* name) {
+  UpdatedItem item;
+  item.name = name;
+  item.value = doc.as<JsonVariantConst>();
+  return item;
+}
+
+TEST_CASE("live bare layer controls apply to the selected layer and mirror canonical state") {
+  Fixture f;
+  f.lm.selectLayer(2, false);
+
+  JsonDocument brightness;
+  brightness.set(123);
+  CHECK(f.lm.handleUpdate(updateFrom(brightness, "brightness")));
+  CHECK_EQ(layerP.layers[2]->brightness, 123);
+  CHECK_EQ(f.state.data["brightness_2"].as<int>(), 123);
+
+  JsonDocument start;
+  start["x"] = 10; start["y"] = 20; start["z"] = 30;
+  CHECK(f.lm.handleUpdate(updateFrom(start, "start")));
+  CHECK_EQ(layerP.layers[2]->startPct.x, 10);
+  CHECK_EQ(f.state.data["start_2"]["y"].as<int>(), 20);
+
+  JsonDocument end;
+  end["x"] = 80; end["y"] = 90; end["z"] = 100;
+  CHECK(f.lm.handleUpdate(updateFrom(end, "end")));
+  CHECK_EQ(layerP.layers[2]->endPct.x, 80);
+  CHECK_EQ(f.state.data["end_2"]["y"].as<int>(), 90);
+  CHECK(layerP.requestMapVirtual);
+}
+
+TEST_CASE("legacy restore ignores bare controls only while canonical layer state is absent") {
+  Fixture f;
+  // A prior canonical preset must not make a following legacy preset look canonical.
+  f.state.data["brightness_0"] = 77;
+  f.state.data["start_0"]["x"] = 12;
+  f.lm.prepareForPresetLoad();
+  CHECK(f.state.data["brightness_0"].isNull());
+  CHECK(f.state.data["start_0"].isNull());
+
+  JsonDocument legacyBrightness;
+  legacyBrightness.set(42);
+  CHECK(f.lm.handleUpdate(updateFrom(legacyBrightness, "brightness")));
+  CHECK_EQ(layerP.layers[0]->brightness, 255);
+  CHECK(f.state.data["brightness_0"].isNull());
+
+  JsonDocument legacyStart;
+  legacyStart["x"] = 16; legacyStart["y"] = 16; legacyStart["z"] = 1;
+  CHECK(f.lm.handleUpdate(updateFrom(legacyStart, "start")));
+  CHECK_EQ(layerP.layers[0]->startPct.x, 0);
+  CHECK(f.state.data["start_0"].isNull());
+}
+
+TEST_CASE("canonical persisted controls still apply during the restore window") {
+  Fixture f;
+  f.state.data["brightness_0"] = 88;
+  f.state.data["start_0"]["x"] = 7;
+  f.state.data["start_0"]["y"] = 8;
+  f.state.data["start_0"]["z"] = 9;
+  f.lm.scheduleRestore();
+
+  JsonDocument brightness;
+  brightness.set(88);
+  CHECK(f.lm.handleUpdate(updateFrom(brightness, "brightness")));
+  CHECK_EQ(layerP.layers[0]->brightness, 88);
+
+  JsonDocument start;
+  start["x"] = 7; start["y"] = 8; start["z"] = 9;
+  CHECK(f.lm.handleUpdate(updateFrom(start, "start")));
+  CHECK_EQ(layerP.layers[0]->startPct.x, 7);
+  CHECK_EQ(f.state.data["start_0"]["z"].as<int>(), 9);
+}
 
 // ---------------------------------------------------------------------------
 // selectLayer — JSON state swap

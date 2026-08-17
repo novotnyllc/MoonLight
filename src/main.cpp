@@ -78,6 +78,7 @@ void operator delete[](void* ptr, size_t size) noexcept {
 #endif
 
 #include <ESP32SvelteKit.h>
+#include <ConfigRecovery.h>
 #include <PsychicHttpServer.h>
 
 #define SERIAL_BAUD_RATE 115200
@@ -141,9 +142,13 @@ TaskHandle_t driverTaskHandle = nullptr;
     if (layerP.lights.header.isPositions == 0 && !newFrameReady) {  // within mutex as driver task can change this
       xSemaphoreGive(swapMutex);  // release so driver can run concurrently while effects write virtualChannels
 
-      uint32_t cycleStartE = esp_cpu_get_cycle_count();
+      {
+        // One read owner covers every exported layer/node/buffer pointer used by
+        // this frame, including asynchronous LiveScript completion and composite.
+        LayerMappingReadGuard frameGuard(layerP.mappingMutex);
+        uint32_t cycleStartE = esp_cpu_get_cycle_count();
 
-      layerP.loop();  // effects write to per-layer virtualChannels — runs in parallel with driver reading channelsD
+        layerP.loop();  // effects write to per-layer virtualChannels — runs in parallel with driver reading channelsD
 
       // Wait for all live script tasks to finish writing their frame
       #if FT_LIVESCRIPT
@@ -157,31 +162,39 @@ TaskHandle_t driverTaskHandle = nullptr;
             scriptsToSync = (scriptsToSync > notified ? scriptsToSync - notified : 0);
             timeouts = 0;
           } else if (++timeouts >= 10) {
-            // 🌙 1 second without any script completing a frame — script task likely dead or stuck.
-            // Force-reset to prevent effectTask from blocking forever (0 lps).
-            EXT_LOGW(ML_TAG, "scriptsToSync=%d after 1s timeout — forcing reset (script task dead?)", scriptsToSync);
-            scriptsToSync = 0;
+            EXT_LOGE(ML_TAG, "scriptsToSync=%d after 1s timeout — quiescing LiveScript tasks", scriptsToSync);
+            if (LiveScriptNode::quiesceTimedOutTasks()) {
+              scriptsToSync = 0;
+            } else {
+              EXT_LOGE(ML_TAG, "LiveScript quiescence incomplete; retaining frame lifetime guard");
+            }
+            timeouts = 0;
           }
         }
       }
       #endif
 
-      esp32sveltekit.lps_effects_cycles += esp_cpu_get_cycle_count() - cycleStartE;
+        esp32sveltekit.lps_effects_cycles += esp_cpu_get_cycle_count() - cycleStartE;
 
-      if (millis() - last20ms >= 20) {
-        last20ms = millis();
-        layerP.loop20ms();
+        if (millis() - last20ms >= 20) {
+          last20ms = millis();
+          layerP.loop20ms();
+        }
+
+        // Wait for driver to finish reading channelsD, then composite virtualChannels into it.
+        xSemaphoreTake(channelsDFreeSemaphore, portMAX_DELAY);
+        xSemaphoreTake(swapMutex, portMAX_DELAY);
+        if (layerP.lights.header.isPositions == 0) {  // check if layout didn't start while we were unlocked
+          layerP.compositeLayers();  // zero channelsD + composite all virtualChannels into it
+          newFrameReady = true;
+        } else {
+          xSemaphoreGive(channelsDFreeSemaphore);  // layout started — release so driver can signal again
+        }
+        xSemaphoreGive(swapMutex);
       }
 
-      // Wait for driver to finish reading channelsD, then composite virtualChannels into it
-      xSemaphoreTake(channelsDFreeSemaphore, portMAX_DELAY);
-      xSemaphoreTake(swapMutex, portMAX_DELAY);
-      if (layerP.lights.header.isPositions == 0) {  // check if layout didn't start while we were unlocked
-        layerP.compositeLayers();  // zero channelsD + composite all virtualChannels into it
-        newFrameReady = true;
-      } else {
-        xSemaphoreGive(channelsDFreeSemaphore);  // layout started — release so driver can signal again
-      }
+      vTaskDelay(1);
+      continue;
     }
 
     xSemaphoreGive(swapMutex);
@@ -199,38 +212,45 @@ TaskHandle_t driverTaskHandle = nullptr;
   static unsigned long last20ms = 0;
 
   while (true) {
-    bool mutexGiven = false;
+    bool frameProcessed = false;
     esp_task_wdt_reset();
-    // Check and transition state under lock
-    xSemaphoreTake(swapMutex, portMAX_DELAY);
-    if (layerP.lights.header.isPositions == 3) {
-      EXT_LOGD(ML_TAG, "positions done (3 -> 0)");
-      layerP.lights.header.isPositions = 0;
-    }
+    layerP.processMappings();
 
-    if (layerP.lights.header.isPositions == 0) {
-      if (newFrameReady) {
-        newFrameReady = false;
-        xSemaphoreGive(swapMutex);  // release lock before sending — effectTask writes virtualChannels concurrently
-        mutexGiven = true;
+    // Acquire mapping before swap to preserve the global mapping -> swap order.
+    // If a frame is ready, this lease is already active before we publish
+    // newFrameReady=false to the dependent effect task.
+    {
+      LayerMappingReadGuard driverFrameGuard(layerP.mappingMutex);
+      xSemaphoreTake(swapMutex, portMAX_DELAY);
+      if (layerP.lights.header.isPositions == 3) {
+        EXT_LOGD(ML_TAG, "positions done (3 -> 0)");
+        layerP.lights.header.isPositions = 0;
+      }
 
-        esp32sveltekit.lps_all++;
-        uint32_t cycleStartD = esp_cpu_get_cycle_count();
+      if (layerP.lights.header.isPositions == 0) {
+        if (newFrameReady) {
+          newFrameReady = false;
+          xSemaphoreGive(swapMutex);  // release lock before sending — effectTask writes virtualChannels concurrently
 
-        layerP.loopDrivers();
+          esp32sveltekit.lps_all++;
+          uint32_t cycleStartD = esp_cpu_get_cycle_count();
 
-        xSemaphoreGive(channelsDFreeSemaphore);  // signal: done reading channelsD, effectTask may now composite
+          layerP.loopDrivers();
 
-        esp32sveltekit.lps_drivers_cycles += esp_cpu_get_cycle_count() - cycleStartD;
+          xSemaphoreGive(channelsDFreeSemaphore);  // signal: done reading channelsD, effectTask may now composite
 
-        if (millis() - last20ms >= 20) {
-          last20ms = millis();
-          layerP.loop20msDrivers();
+          esp32sveltekit.lps_drivers_cycles += esp_cpu_get_cycle_count() - cycleStartD;
+
+          if (millis() - last20ms >= 20) {
+            last20ms = millis();
+            layerP.loop20msDrivers();
+          }
+          frameProcessed = true;
         }
       }
-    }
 
-    if (!mutexGiven) xSemaphoreGive(swapMutex);  // not double buffer or if conditions not met
+      if (!frameProcessed) xSemaphoreGive(swapMutex);
+    }
     vTaskDelay(1);
   }
   // Cleanup (never reached in this case, but good practice)
@@ -286,6 +306,13 @@ void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
 #endif
 
+  // Newlib creates each stdio stream's recursive lock on first use. Reserve the
+  // error-stream lock before internal RAM can be exhausted by network tasks.
+  flockfile(stderr);
+  funlockfile(stderr);
+  flockfile(stdout);
+  funlockfile(stdout);
+
   for (int i = 0; i < 5; i++) {
     if (!Serial) delay(300);                                      // just a tiny wait to avoid problems later when acessing serial
     if (Serial) Serial.printf("Serial init wait %d\n", i * 300);  // ok-lint: Serial used before logging is initialized
@@ -298,13 +325,45 @@ void setup() {
 
   Serial.printf("C++ Standard: %ld\n", __cplusplus);  // ok-lint: Serial used before logging is initialized
 
+#ifdef FACTORY_SAFE_MODE_BUTTON
+  pinMode(FACTORY_SAFE_MODE_BUTTON, INPUT);  // Dig-Next-2 has a hardware pull-up on GPIO34
+  delay(25);
+  if (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW) {
+    uint32_t pressedAt = millis();
+    while (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW && millis() - pressedAt < 3000) delay(25);
+    if (digitalRead(FACTORY_SAFE_MODE_BUTTON) != LOW) {
+      ESP_LOGW(ML_TAG, "Ignored short recovery-button press");
+    } else {
+#ifdef CONFIG_RECOVERY_ENABLED
+      ConfigRecovery::requestRestore();
+#endif
+      safeModeMB = true;
+      ESP_LOGW(ML_TAG, "Recovery Button_1 held for 3 seconds; requesting confirmed configuration or safe mode");
+    }
+  }
+#endif
+
+#if defined(BOARD_HAS_PSRAM)
+  if (psramFound()) {
+    // Initialize the ESP-IDF log path while internal memory is plentiful. Large
+    // HTTP JSON documents use their own PSRAM allocator; performance-critical
+    // FFT and DMA state retain the platform's normal internal-memory policy.
+    // Warning level is retained in release builds and initializes the UART VFS
+    // lock before memory pressure can make an error log allocate it too late.
+    ESP_LOGW(ML_TAG, "PSRAM available for HTTP response documents");
+  }
+#endif
+
   if (esp_reset_reason() != ESP_RST_UNKNOWN && esp_reset_reason() != ESP_RST_POWERON && esp_reset_reason() != ESP_RST_SW && esp_reset_reason() != ESP_RST_USB) {  // see verbosePrintResetReason
     // ESP_RST_USB is after usb flashing! since esp-idf5
     safeModeMB = true;
   }
 
   // start ESP32-SvelteKit
-  esp32sveltekit.begin();
+  if (!esp32sveltekit.begin()) {
+    ESP_LOGE(ML_TAG, "Startup stopped after failed configuration recovery");
+    return;
+  }
 
   // Create shared routers (one-time)
   sharedHttpEndpoint = new SharedHttpEndpoint(&server, esp32sveltekit.getSecurityManager());

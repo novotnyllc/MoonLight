@@ -48,6 +48,7 @@ PhysicalLayer::~PhysicalLayer() {
 }
 
 VirtualLayer* PhysicalLayer::ensureLayer(uint8_t index) {
+  LayerMappingGuard guard(mappingMutex);
   if (index >= layers.size()) return nullptr;
   if (!layers[index]) {
     layers[index] = new VirtualLayer();
@@ -60,6 +61,7 @@ VirtualLayer* PhysicalLayer::ensureLayer(uint8_t index) {
 }
 
 void PhysicalLayer::setup() {
+  LayerMappingGuard guard(mappingMutex);
   // channelsD is allocated lazily in addLight() during pass 1 as lights are added (doubling strategy).
   // It is shrunk to nrOfChannels at the end of pass 1.  OOM is handled by realloc returning nullptr.
   for (VirtualLayer* layer : layers) {
@@ -73,10 +75,7 @@ void PhysicalLayer::loop() {
   // Effects write to per-layer virtualChannels; channelsD is zeroed and composited
   // in compositeLayers(), called from main.cpp after channelsDFreeSemaphore is signalled.
 
-  for (uint8_t i = 0; i < activeLayerCount && i < layers.size(); i++) {
-    VirtualLayer* layer = layers[i];
-    if (!layer) continue;  // defensive, should not happen with sequential creation
-  
+  forEachPresentPointer(layers, [&](VirtualLayer* layer) {
     layer->loop();
 
     // Step transition animation: move transitionBrightness toward transitionTarget one step per frame
@@ -89,7 +88,7 @@ void PhysicalLayer::loop() {
       }
       layer->transitionBrightness = (uint8_t)next;
     }
-  }
+  });
 }
 
 void PhysicalLayer::compositeLayers() {
@@ -106,38 +105,34 @@ void PhysicalLayer::compositeLayers() {
 
 void PhysicalLayer::loop20ms() {
   // runs the loop of all effects / nodes in the layer
-  for (uint8_t i = 0; i < activeLayerCount && i < layers.size(); i++) {
-    VirtualLayer* layer = layers[i];
-    if (layer) layer->loop20ms();  // if (layer) needed when deleting rows ...
+  forEachPresentPointer(layers, [](VirtualLayer* layer) { layer->loop20ms(); });
+}
+
+void PhysicalLayer::processMappings() {
+  if (requestMapPhysical.load() || requestMapVirtual.load()) {
+    LayerMappingGuard mappingGuard(mappingMutex);
+    // Consume before mapping so a request raised during this pass survives for
+    // the next iteration instead of being erased after the work completes.
+    if (requestMapPhysical.exchange(false)) {
+      EXT_LOGD(ML_TAG, "mapLayout physical requested");
+      pass = 1;
+      mapLayout();
+      requestMapVirtual.store(true);  // pass 2 must follow pass 1
+    }
+
+    if (requestMapVirtual.load()) {
+      // Pass 2 writes to channelsD after monitor consumes pass-1 positions.
+      if (lights.header.isPositions == 2) return;
+      if (requestMapVirtual.exchange(false)) {
+        EXT_LOGD(ML_TAG, "mapLayout virtual requested");
+        pass = 2;
+        mapLayout();
+      }
+    }
   }
 }
 
 void PhysicalLayer::loopDrivers() {
-  // run mapping in the drivers task
-
-  if (requestMapPhysical) {
-    EXT_LOGD(ML_TAG, "mapLayout physical requested");
-
-    pass = 1;
-    mapLayout();
-
-    requestMapPhysical = false;
-    requestMapVirtual = true;  // pass 2 must always follow pass 1 so the virtual mapping table reflects the new physical layout
-  }
-
-  if (requestMapVirtual) {
-    // wait until monitor has consumed the positions from pass 1 before running pass 2,
-    // because pass 2 writes to channelsD which pass 1 used to store position data
-    if (lights.header.isPositions == 2) return;  // will retry next loopDrivers() iteration
-
-    EXT_LOGD(ML_TAG, "mapLayout virtual requested");
-
-    pass = 2;
-    mapLayout();
-
-    requestMapVirtual = false;
-  }
-
   // for physical layer nodes
   if (prevSize != lights.header.size) EXT_LOGD(ML_TAG, "onSizeChanged P %d,%d,%d -> %d,%d,%d", prevSize.x, prevSize.y, prevSize.z, lights.header.size.x, lights.header.size.y, lights.header.size.z);
 

@@ -1,4 +1,7 @@
 #include "PsychicJson.h"
+#include <esp_heap_caps.h>
+
+static constexpr size_t JSON_INTERNAL_CHUNK_SIZE = 512;
 
 #ifdef ARDUINOJSON_6_COMPATIBILITY
   PsychicJsonResponse::PsychicJsonResponse(PsychicRequest *request, bool isArray, size_t maxJsonBufferSize) :
@@ -12,7 +15,7 @@
       _root = _jsonBuffer.createNestedObject();
   }
 #else
-  PsychicJsonResponse::PsychicJsonResponse(PsychicRequest *request, bool isArray) : PsychicResponse(request)
+  PsychicJsonResponse::PsychicJsonResponse(PsychicRequest *request, bool isArray) : PsychicResponse(request), _jsonBuffer(PsychicJsonAllocator::instance())
   {
     setContentType(JSON_MIMETYPE);
     if (isArray)
@@ -37,19 +40,22 @@ esp_err_t PsychicJsonResponse::send()
   char *buffer;
 
   //how big of a buffer do we want?
-  if (length < JSON_BUFFER_SIZE)
+  if (length < JSON_INTERNAL_CHUNK_SIZE)
     buffer_size = length+1;
   else
-    buffer_size = JSON_BUFFER_SIZE;
+    buffer_size = JSON_INTERNAL_CHUNK_SIZE;
 
-  buffer = (char *)malloc(buffer_size);
+  buffer = static_cast<char *>(heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (buffer == NULL && buffer_size > 256) {
+    buffer_size = 256;
+    buffer = static_cast<char *>(heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  }
   if (buffer == NULL) {
-    httpd_resp_send_err(this->_request->request(), HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to allocate memory.");
-    return ESP_FAIL;
+    return sendServiceUnavailable(this->_request);
   }
 
   //send it in one shot or no?
-  if (length < JSON_BUFFER_SIZE)
+  if (length < buffer_size)
   {
     serializeJson(_root, buffer, buffer_size);
 
@@ -76,7 +82,7 @@ esp_err_t PsychicJsonResponse::send()
   }
 
   //let the buffer go
-  free(buffer);
+  heap_caps_free(buffer);
 
   return err;
 }

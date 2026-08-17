@@ -126,7 +126,7 @@ public:
 
     ESP32SvelteKit(PsychicHttpServer *server, unsigned int numberEndpoints = 115);
 
-    void begin();
+    bool begin();
 
     ConnectionStatus getConnectionStatus()
     {

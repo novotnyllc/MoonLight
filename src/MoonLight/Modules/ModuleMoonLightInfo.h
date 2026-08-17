@@ -50,6 +50,7 @@ class ModuleMoonLightInfo : public Module {
     Module::begin();
 
     _state.readHook = [&](JsonObject data) {
+      LayerMappingGuard guard(layerP.mappingMutex);
       EXT_LOGV(ML_TAG, "readHook");
       // this should be updated each time the UI queries for it ... (now only at boot)
       data["nrOfLights"] = layerP.lights.header.nrOfLights;

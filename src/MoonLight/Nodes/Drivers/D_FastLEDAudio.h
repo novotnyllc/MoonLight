@@ -17,6 +17,9 @@
   #include "fl/audio/audio_processor.h"
   #include "fl/audio/detector/equalizer.h"
   #include "fl/audio/input.h"
+  #include <ConfigRecovery.h>
+  #include <driver/i2s_pdm.h>
+  #include <esp_task_wdt.h>
 // #include "fl/time_alpha.h"
 
 // https://github.com/FastLED/FastLED/blob/master/src/fl/audio/README.md
@@ -28,6 +31,11 @@ class FastLEDAudioDriver : public Node {
   fl::audio::ConfigPdm* pdmConfig = nullptr;
   fl::audio::Config* config = nullptr;
   fl::shared_ptr<fl::audio::IInput> audioInput;
+  i2s_chan_handle_t pdmRxHandle = nullptr;
+  bool boundedPdmActive = false;
+  uint64_t pdmSamples = 0;
+  uint32_t lastPdmRetry = 0;
+  uint32_t lastPdmSample = 0;
 
  public:
   static const char* name() { return "FastLED Audio"; }
@@ -42,8 +50,11 @@ class FastLEDAudioDriver : public Node {
   bool noiseFloorTracking = false;
   uint8_t channel = (uint8_t)fl::audio::AudioChannel::Left;
   uint8_t gain = 128;
-  bool drainBuffer = false;  // if false 60 fps. otherwise 40 fps
+  bool drainBuffer = true;  // process the complete PDM buffer so EQ and beat detection receive enough samples
   Char<32> status = "No pins";
+  uint32_t samplesCaptured = 0;
+  uint8_t audioLevel = 0;
+  uint32_t lastTelemetryUpdate = 0;
 
   void setup() override {
     addControl(signalConditioning, "signalConditioning", "checkbox");
@@ -54,8 +65,15 @@ class FastLEDAudioDriver : public Node {
     addControlValue("Left");
     addControlValue("Right");
     addControlValue("Both");
-    addControl(drainBuffer, "drainBuffer", "checkbox");
+    JsonObject drainBufferControl = addControl(drainBuffer, "drainBuffer", "checkbox");
+    // The legacy false default starves the 44.1 kHz processor at the driver loop rate.
+    if (!drainBuffer) {
+      drainBuffer = true;
+      drainBufferControl["value"] = true;
+    }
     addControl(status, "status", "text", 0, 32, true);
+    addControl(samplesCaptured, "samples", "number", 0, INT_MAX, true);
+    addControl(audioLevel, "level", "number", 0, UINT8_MAX, true);
 
     ioUpdateHandler = moduleIO->addUpdateHandler([this](const String& originId) { readPins(); });
     readPins();  // Node added at runtime so initial IO update not received so run explicitly
@@ -138,6 +156,16 @@ class FastLEDAudioDriver : public Node {
   }
 
   void onUpdate(const JsonObject& control) override {
+#ifdef CONFIG_RECOVERY_ENABLED
+    if (!on) ConfigRecovery::reportSoundHealthy(false);
+#endif
+    if (!control["on"].isNull()) {
+      if (!on) {
+        stopService();
+      } else if (!audioInput && !boundedPdmActive && pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX && (!safeModeMB || WiFi.isConnected())) {
+        startService();
+      }
+    }
     if (control["name"] == "signalConditioning") {
       audioProcessor.setSignalConditioningEnabled(signalConditioning);
     }
@@ -162,18 +190,27 @@ class FastLEDAudioDriver : public Node {
   uint8_t pinI2SSCK = UINT8_MAX;
 
   void readPins() {
-    if (safeModeMB) {
-      EXT_LOGW(ML_TAG, "Safe mode enabled, not adding pins");
-      return;
-    }
+    if (safeModeMB) EXT_LOGW(ML_TAG, "Safe mode enabled; keeping bounded audio input available");
 
     bool changed = moduleIO->updatePin(pinI2SWS, pin_I2S_WS);
     changed = moduleIO->updatePin(pinI2SSD, pin_I2S_SD) || changed;
     changed = moduleIO->updatePin(pinI2SSCK, pin_I2S_SCK) || changed;
 
+#ifdef CONFIG_RECOVERY_ENABLED
+    ConfigRecovery::requireSound(pinI2SSCK == UINT8_MAX && pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX);
+#endif
+
     if (changed) {
       stopService();
       if (pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX) {
+        if (!on) {
+          updateControl("status", "Stopped");
+          return;
+        }
+        if (safeModeMB && !WiFi.isConnected()) {
+          updateControl("status", "PDM waiting for WiFi");
+          return;
+        }
         EXT_LOGI(ML_TAG, "(re)creating audioInput WS:%d SD:%d SCK:%d (%s)", pinI2SWS, pinI2SSD, pinI2SSCK, pinI2SSCK != UINT8_MAX ? "I2S" : "PDM");
         startService();
       } else {
@@ -183,7 +220,13 @@ class FastLEDAudioDriver : public Node {
   }
 
   void loop() override {
-    if (!audioInput) return;
+    if (!drainBuffer) updateControl("drainBuffer", true);
+    if (!audioInput && !boundedPdmActive) {
+      if ((!safeModeMB || WiFi.isConnected()) && pinI2SSCK == UINT8_MAX && pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX && millis() - lastPdmRetry >= 5000) {
+        startService();
+      }
+      return;
+    }
 
     sharedData.fl_beat = false;
     sharedData.fl_kick = false;
@@ -197,14 +240,45 @@ class FastLEDAudioDriver : public Node {
     // Calling audioInput->read() only once per iteration drains a single sample while leaving the remaining buffered samples unprocessed.
     // With 44.1 kHz input and typical loop cadence (~20 ms), roughly 800+ samples accumulate and are discarded each frame, causing severe data loss and degraded EQ/beat/BPM detection.
 
-    if (drainBuffer) {
+    if (boundedPdmActive) {
+      int16_t samples[256];
+      for (uint8_t reads = 0; reads < 6; ++reads) {
+        size_t bytesRead = 0;
+        esp_err_t err = i2s_channel_read(pdmRxHandle, samples, sizeof(samples), &bytesRead, 0);
+        if (err != ESP_OK || bytesRead == 0) break;
+        size_t count = bytesRead / sizeof(int16_t);
+        uint32_t timestamp = static_cast<uint32_t>(pdmSamples * 1000ULL / 44100ULL);
+        pdmSamples += count;
+        samplesCaptured += count;
+        lastPdmSample = millis();
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::reportSoundHealthy(true);
+#endif
+        audioProcessor.update(fl::audio::Sample(fl::span<const fl::i16>(samples, count), timestamp));
+        esp_task_wdt_reset();
+      }
+      if (millis() - lastPdmSample >= 5000) {
+        EXT_LOGW(ML_TAG, "PDM produced no samples for 5 seconds; restarting input");
+        stopService();
+        updateControl("status", "PDM stalled; retrying");
+        return;
+      }
+    } else if (drainBuffer) {
       while (fl::audio::Sample sample = audioInput->read()) {
+        samplesCaptured += sample.size();
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::reportSoundHealthy(true);
+#endif
         audioProcessor.update(sample);
       }
 
     } else {
       fl::audio::Sample sample = audioInput->read();
       if (sample.isValid()) {
+        samplesCaptured += sample.size();
+#ifdef CONFIG_RECOVERY_ENABLED
+        ConfigRecovery::reportSoundHealthy(true);
+#endif
         audioProcessor.update(sample);
       }
     }
@@ -215,6 +289,7 @@ class FastLEDAudioDriver : public Node {
     // Volume system overhaul — now 0.0–1.0 normalized: https://github.com/FastLED/FastLED/issues/2193#issuecomment-4192711473
     // const float norm = (audioProcessor.getEqVolumeNormFactor() > 0.000001f) ? audioProcessor.getEqVolumeNormFactor() : 1.0f;
     sharedData.volume = audioProcessor.getEqVolume() * 255.0;// normalised volume (   * 255 * 2560.0f; // WLED correction!)
+    audioLevel = sharedData.volume < 0 ? 0 : sharedData.volume > 255 ? 255 : static_cast<uint8_t>(sharedData.volume);
     sharedData.volumeRaw = (int16_t)sharedData.volume;
     // sharedData.volumeRaw = audioProcessor.getEqVolumeDb() * 255;
     sharedData.majorPeak = audioProcessor.getEqDominantFreqHz();
@@ -235,17 +310,27 @@ class FastLEDAudioDriver : public Node {
     sharedData.fl_beat = sharedData.fl_beatConfidence > 0.5f;  // audioProcessor.isBeat(); // not implemented yet ...
 
     sharedData.fl_bpm = audioProcessor.getBPM();
+
+    if (millis() - lastTelemetryUpdate >= 500) {
+      lastTelemetryUpdate = millis();
+      updateControl("samples", samplesCaptured);
+      updateControl("level", audioLevel);
+      moduleNodes->queueSnapshot(name());
+    }
   }
 
   void startService() {
+    lastPdmRetry = millis();
     if (pinI2SSCK != UINT8_MAX) {
       // Standard I2S microphone (3 pins: WS, SD, SCK)
       i2sConfig = new fl::audio::ConfigI2S(pinI2SWS, pinI2SSD, pinI2SSCK, 0, channel == 1 ? fl::audio::AudioChannel::Right : channel == 2 ? fl::audio::AudioChannel::Both : fl::audio::AudioChannel::Left, 44100, 16, fl::audio::I2SCommFormat::Philips);
       config = new fl::audio::Config(*i2sConfig);
     } else {
       // PDM microphone (2 pins: SD=data, WS=clock) — e.g. QuinLED Dig-Next-2
-      pdmConfig = new fl::audio::ConfigPdm(pinI2SSD, pinI2SWS, 0);
-      config = new fl::audio::Config(*pdmConfig);
+      if (startBoundedPdm()) {
+        updateControl("status", "PDM active");
+      }
+      return;
     }
 
     fl::string errorMsg;
@@ -266,6 +351,19 @@ class FastLEDAudioDriver : public Node {
   }
 
   void stopService() {
+#ifdef CONFIG_RECOVERY_ENABLED
+    ConfigRecovery::reportSoundHealthy(false);
+#endif
+    if (boundedPdmActive) {
+      i2s_channel_disable(pdmRxHandle);
+      i2s_del_channel(pdmRxHandle);
+      pdmRxHandle = nullptr;
+      boundedPdmActive = false;
+      pdmSamples = 0;
+      lastPdmSample = 0;
+      samplesCaptured = 0;
+      updateControl("status", "Stopped");
+    }
     if (audioInput) {
       audioInput->stop();
       audioInput.reset();
@@ -287,6 +385,59 @@ class FastLEDAudioDriver : public Node {
       delete pdmConfig;
       pdmConfig = nullptr;
     }
+  }
+
+  bool startBoundedPdm() {
+#ifdef CONFIG_RECOVERY_ENABLED
+    ConfigRecovery::reportSoundHealthy(false);
+#endif
+    i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    channel.dma_desc_num = 6;
+    channel.dma_frame_num = 256;
+
+    esp_err_t err = i2s_new_channel(&channel, nullptr, &pdmRxHandle);
+    if (err != ESP_OK) {
+      EXT_LOGE(ML_TAG, "Failed to create PDM I2S channel: %s", esp_err_to_name(err));
+      status.format("PDM create: %s", esp_err_to_name(err));
+      updateControl("status", status.c_str());
+      return false;
+    }
+
+    i2s_pdm_rx_config_t pdm = {
+      .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(44100),
+      .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+      .gpio_cfg = {
+        .clk = static_cast<gpio_num_t>(pinI2SWS),
+        .din = static_cast<gpio_num_t>(pinI2SSD),
+        .invert_flags = {
+          .clk_inv = false,
+        },
+      },
+    };
+    err = i2s_channel_init_pdm_rx_mode(pdmRxHandle, &pdm);
+    if (err != ESP_OK) {
+      EXT_LOGE(ML_TAG, "Failed to initialize PDM RX mode: %s", esp_err_to_name(err));
+      status.format("PDM init: %s", esp_err_to_name(err));
+      updateControl("status", status.c_str());
+      i2s_del_channel(pdmRxHandle);
+      pdmRxHandle = nullptr;
+      return false;
+    }
+
+    err = i2s_channel_enable(pdmRxHandle);
+    if (err != ESP_OK) {
+      EXT_LOGE(ML_TAG, "Failed to enable PDM channel: %s", esp_err_to_name(err));
+      status.format("PDM enable: %s", esp_err_to_name(err));
+      updateControl("status", status.c_str());
+      i2s_del_channel(pdmRxHandle);
+      pdmRxHandle = nullptr;
+      return false;
+    }
+
+    pdmSamples = 0;
+    lastPdmSample = millis();
+    boundedPdmActive = true;
+    return true;
   }
 
   ~FastLEDAudioDriver() override {

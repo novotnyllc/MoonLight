@@ -32,7 +32,7 @@ class ModuleEffects : public NodeManager {
   }
 
   void begin() override {
-    defaultNodeName = getNameAndTags<RandomEffect>();
+    defaultNodeName = safeModeMB ? getNameAndTags<SolidEffect>() : getNameAndTags<RandomEffect>();
     layerMgr.init(_state, nodes, requestUIUpdate);
     layerMgr.selectLayer(0, false);  // initial setup, no state to swap yet
     NodeManager::begin();
@@ -40,22 +40,27 @@ class ModuleEffects : public NodeManager {
 
   #if FT_ENABLED(FT_MONITOR)
     _sveltekit->getSocket()->registerEvent("monitor");
-    _server->on("/rest/monitorLayout", HTTP_GET, [&](PsychicRequest* request) {
-      EXT_LOGV(ML_TAG, "rest monitor triggered");
+    _server->on(
+        "/rest/monitorLayout", HTTP_GET,
+        _sveltekit->getSecurityManager()->wrapRequest(
+            [&](PsychicRequest* request) {
+              EXT_LOGV(ML_TAG, "rest monitor triggered");
+              LayerMappingGuard guard(layerP.mappingMutex);
+              layerP.pass = 1;
+              layerP.monitorPass = true;
+              layerP.mapLayout();
+              layerP.monitorPass = false;
 
-      // trigger pass 1 mapping of layout
-      layerP.pass = 1;  //(requestMapPhysical=1 physical rerun)
-      layerP.monitorPass = true;
-      layerP.mapLayout();
-      layerP.monitorPass = false;
-
-      PsychicJsonResponse response = PsychicJsonResponse(request, false);
-      return response.send();
-    });
+              PsychicJsonResponse response = PsychicJsonResponse(request, false);
+              return response.send();
+            },
+            AuthenticationPredicates::IS_AUTHENTICATED));
   #endif
 
     layerMgr.installReadHook();
   }
+
+  bool shouldLoadPersistedState() const override { return !safeModeMB; }
 
   void setupDefinition(const JsonArray& controls) override {
     EXT_LOGV(ML_TAG, "");

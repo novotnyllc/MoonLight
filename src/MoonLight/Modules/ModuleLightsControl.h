@@ -14,6 +14,8 @@
 
 #if FT_MOONLIGHT
 
+  #include <vector>
+
   #include "FastLED.h"
   #include "MoonBase/Module.h"
   #include "MoonBase/Modules/FileManager.h"
@@ -255,7 +257,11 @@ class ModuleLightsControl : public Module {
             } else if (usage == pin_Button_Push_LightsOn) {
               if (GPIO_IS_VALID_GPIO(gpio)) {
                 pinPushButtonLightsOn = gpio;
+#if CONFIG_IDF_TARGET_ESP32
+                pinMode(pinPushButtonLightsOn, gpio >= 34 && gpio <= 39 ? INPUT : INPUT_PULLUP);
+#else
                 pinMode(pinPushButtonLightsOn, INPUT_PULLUP);
+#endif
                 EXT_LOGD(ML_TAG, "pinPushButtonLightsOn found %d", pinPushButtonLightsOn);
               } else
                 EXT_LOGE(MB_TAG, "gpio %d not valid", pinPushButtonLightsOn);
@@ -644,36 +650,52 @@ class ModuleLightsControl : public Module {
 
   #if FT_ENABLED(FT_MONITOR)
     extern SemaphoreHandle_t swapMutex;
+    static std::vector<uint8_t, VectorRAMAllocator<uint8_t>> monitorSnapshot;
+    static LightsHeader monitorHeaderSnapshot;
+    bool emitMonitorHeader = false;
+    bool emitMonitorData = false;
+    bool monitorEnabled = _sveltekit->getSocket()->getActiveClients() && _state.data["monitorOn"];
 
-    // Check and transition under lock
-    xSemaphoreTake(swapMutex, portMAX_DELAY);
-    uint8_t isPositions = layerP.lights.header.isPositions;
-    xSemaphoreGive(swapMutex);
-
-    if (isPositions == 2) {  // send to UI
-      if (layerP.lights.channelsD) {  // guard: OOM in addLight() can leave channelsD null while isPositions==2
-        if (_sveltekit->getSocket()->getActiveClients() && _state.data["monitorOn"]) {
-          static_assert(sizeof(LightsHeader) > headerPrimeNumber, "LightsHeader size nog large enough for Monitor protocol");
-          _sveltekit->getSocket()->emitEvent("monitor", (char*)&layerP.lights.header, headerPrimeNumber, _moduleName);                                                      // send headerPrimeNumber bytes so Monitor.svelte can recognize this
-          _sveltekit->getSocket()->emitEvent("monitor", (char*)layerP.lights.channelsD, layerP.lights.header.nrOfLights * 3, _moduleName);  //*3 is for 3 bytes position
-        }
-        // isPositions==2 is set before onLayoutPost() resizes channelsD to nrOfChannels,
-        // so channelsD holds only nrOfLights*3 bytes here. Use that size, not nrOfChannels.
-        memset(layerP.lights.channelsD, 0, layerP.lights.header.nrOfLights * 3);  // clear position data only
-      }
+    {
+      LayerMappingReadGuard monitorGuard(layerP.mappingMutex);
       xSemaphoreTake(swapMutex, portMAX_DELAY);
-      EXT_LOGD(ML_TAG, "positions sent to monitor (2 -> 3)");
-      layerP.lights.header.isPositions = 3;
-      xSemaphoreGive(swapMutex);
-    } else if (isPositions == 0 && layerP.lights.header.nrOfLights) {  // send to UI
-      static unsigned long monitorMillis = 0;
-      if (millis() - monitorMillis >= MAX(20, layerP.lights.header.nrOfLights / 300)) {  // 12K lights -> 40ms
-        monitorMillis = millis();
+      uint8_t isPositions = layerP.lights.header.isPositions;
 
-        if (layerP.lights.channelsD && _sveltekit->getSocket()->getActiveClients() && _state.data["monitorOn"]) {
-          _sveltekit->getSocket()->emitEvent("monitor", (char*)layerP.lights.channelsD, layerP.lights.header.nrOfChannels, _moduleName);  // use channelsD as it won't be overwritten by effects during loop
+      if (isPositions == 2) {
+        if (layerP.lights.channelsD) {
+          size_t positionBytes = layerP.lights.header.nrOfLights * 3;
+          if (monitorEnabled) {
+            monitorHeaderSnapshot = layerP.lights.header;
+            monitorSnapshot.resize(positionBytes);
+            memcpy(monitorSnapshot.data(), layerP.lights.channelsD, positionBytes);
+            emitMonitorHeader = true;
+            emitMonitorData = true;
+          }
+          memset(layerP.lights.channelsD, 0, positionBytes);
+        }
+        EXT_LOGD(ML_TAG, "positions copied for monitor (2 -> 3)");
+        layerP.lights.header.isPositions = 3;
+      } else if (isPositions == 0 && layerP.lights.header.nrOfLights) {
+        static unsigned long monitorMillis = 0;
+        if (millis() - monitorMillis >= MAX(20, layerP.lights.header.nrOfLights / 300)) {
+          monitorMillis = millis();
+          if (layerP.lights.channelsD && monitorEnabled) {
+            size_t channelBytes = layerP.lights.header.nrOfChannels;
+            monitorSnapshot.resize(channelBytes);
+            memcpy(monitorSnapshot.data(), layerP.lights.channelsD, channelBytes);
+            emitMonitorData = true;
+          }
         }
       }
+      xSemaphoreGive(swapMutex);
+    }
+
+    if (emitMonitorHeader) {
+      static_assert(sizeof(LightsHeader) > headerPrimeNumber, "LightsHeader size nog large enough for Monitor protocol");
+      _sveltekit->getSocket()->emitEvent("monitor", (char*)&monitorHeaderSnapshot, headerPrimeNumber, _moduleName);
+    }
+    if (emitMonitorData) {
+      _sveltekit->getSocket()->emitEvent("monitor", (char*)monitorSnapshot.data(), monitorSnapshot.size(), _moduleName);
     }
   #endif
   }

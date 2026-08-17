@@ -63,6 +63,9 @@ class LiveScriptNode : public Node {
   void free();
   /// Kills the script and deletes its executable from the runtime.
   void killAndDelete();
+  /// Synchronously stops every registered loop task after a frame timeout.
+  /// Returns only after no timed-out node can schedule another frame.
+  static bool quiesceTimedOutTasks();
   /// Populates a JsonArray with info about all running LiveScript executables.
   static void getScriptsJson(JsonArray scripts);
 };
