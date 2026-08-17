@@ -15,7 +15,7 @@ static constexpr size_t JSON_INTERNAL_CHUNK_SIZE = 512;
       _root = _jsonBuffer.createNestedObject();
   }
 #else
-  PsychicJsonResponse::PsychicJsonResponse(PsychicRequest *request, bool isArray) : PsychicResponse(request)
+  PsychicJsonResponse::PsychicJsonResponse(PsychicRequest *request, bool isArray) : PsychicResponse(request), _jsonBuffer(PsychicJsonAllocator::instance())
   {
     setContentType(JSON_MIMETYPE);
     if (isArray)

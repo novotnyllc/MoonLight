@@ -32,6 +32,7 @@ class FastLEDAudioDriver : public Node {
   i2s_chan_handle_t pdmRxHandle = nullptr;
   bool boundedPdmActive = false;
   uint64_t pdmSamples = 0;
+  uint32_t lastPdmRetry = 0;
 
  public:
   static const char* name() { return "FastLED Audio"; }
@@ -198,7 +199,12 @@ class FastLEDAudioDriver : public Node {
 
   void loop() override {
     if (!drainBuffer) updateControl("drainBuffer", true);
-    if (!audioInput && !boundedPdmActive) return;
+    if (!audioInput && !boundedPdmActive) {
+      if (pinI2SSCK == UINT8_MAX && pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX && millis() - lastPdmRetry >= 5000) {
+        startService();
+      }
+      return;
+    }
 
     sharedData.fl_beat = false;
     sharedData.fl_kick = false;
@@ -214,7 +220,7 @@ class FastLEDAudioDriver : public Node {
 
     if (boundedPdmActive) {
       int16_t samples[256];
-      while (true) {
+      for (uint8_t reads = 0; reads < 4; ++reads) {
         size_t bytesRead = 0;
         esp_err_t err = i2s_channel_read(pdmRxHandle, samples, sizeof(samples), &bytesRead, 0);
         if (err != ESP_OK || bytesRead == 0) break;
@@ -274,6 +280,7 @@ class FastLEDAudioDriver : public Node {
   }
 
   void startService() {
+    lastPdmRetry = millis();
     if (pinI2SSCK != UINT8_MAX) {
       // Standard I2S microphone (3 pins: WS, SD, SCK)
       i2sConfig = new fl::audio::ConfigI2S(pinI2SWS, pinI2SSD, pinI2SSCK, 0, channel == 1 ? fl::audio::AudioChannel::Right : channel == 2 ? fl::audio::AudioChannel::Both : fl::audio::AudioChannel::Left, 44100, 16, fl::audio::I2SCommFormat::Philips);
@@ -282,8 +289,6 @@ class FastLEDAudioDriver : public Node {
       // PDM microphone (2 pins: SD=data, WS=clock) — e.g. QuinLED Dig-Next-2
       if (startBoundedPdm()) {
         updateControl("status", "PDM active");
-      } else {
-        updateControl("status", "Failed to initialize PDM audio");
       }
       return;
     }
@@ -346,6 +351,8 @@ class FastLEDAudioDriver : public Node {
     esp_err_t err = i2s_new_channel(&channel, nullptr, &pdmRxHandle);
     if (err != ESP_OK) {
       EXT_LOGE(ML_TAG, "Failed to create PDM I2S channel: %s", esp_err_to_name(err));
+      status.format("PDM create: %s", esp_err_to_name(err));
+      updateControl("status", status.c_str());
       return false;
     }
 
@@ -363,6 +370,8 @@ class FastLEDAudioDriver : public Node {
     err = i2s_channel_init_pdm_rx_mode(pdmRxHandle, &pdm);
     if (err != ESP_OK) {
       EXT_LOGE(ML_TAG, "Failed to initialize PDM RX mode: %s", esp_err_to_name(err));
+      status.format("PDM init: %s", esp_err_to_name(err));
+      updateControl("status", status.c_str());
       i2s_del_channel(pdmRxHandle);
       pdmRxHandle = nullptr;
       return false;
@@ -371,6 +380,8 @@ class FastLEDAudioDriver : public Node {
     err = i2s_channel_enable(pdmRxHandle);
     if (err != ESP_OK) {
       EXT_LOGE(ML_TAG, "Failed to enable PDM channel: %s", esp_err_to_name(err));
+      status.format("PDM enable: %s", esp_err_to_name(err));
+      updateControl("status", status.c_str());
       i2s_del_channel(pdmRxHandle);
       pdmRxHandle = nullptr;
       return false;

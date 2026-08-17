@@ -298,6 +298,15 @@ void setup() {
 
   Serial.printf("C++ Standard: %ld\n", __cplusplus);  // ok-lint: Serial used before logging is initialized
 
+#if defined(BOARD_HAS_PSRAM)
+  if (psramFound()) {
+    // Initialize the ESP-IDF log path while internal memory is plentiful. Large
+    // HTTP JSON documents use their own PSRAM allocator; performance-critical
+    // FFT and DMA state retain the platform's normal internal-memory policy.
+    ESP_LOGI(ML_TAG, "PSRAM available for HTTP response documents");
+  }
+#endif
+
   if (esp_reset_reason() != ESP_RST_UNKNOWN && esp_reset_reason() != ESP_RST_POWERON && esp_reset_reason() != ESP_RST_SW && esp_reset_reason() != ESP_RST_USB) {  // see verbosePrintResetReason
     // ESP_RST_USB is after usb flashing! since esp-idf5
     safeModeMB = true;
