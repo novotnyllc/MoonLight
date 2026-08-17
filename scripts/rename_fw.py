@@ -27,7 +27,7 @@ OUTPUT_DIR = "build{}release{}".format(os.path.sep, os.path.sep)
 def readFlag(flag):
     buildFlags = env.ParseFlags(env["BUILD_FLAGS"])
     # print(buildFlags.get("CPPDEFINES"))
-    for define in buildFlags.get("CPPDEFINES"):
+    for define in reversed(buildFlags.get("CPPDEFINES")):
         if (define == flag or (isinstance(define, list) and define[0] == flag)):
             # print("Found "+flag+" = "+define[1])
             # strip quotes ("") from define[1]
