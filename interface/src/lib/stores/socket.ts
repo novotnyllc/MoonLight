@@ -1,16 +1,17 @@
 import { writable } from 'svelte/store';
 import msgpack from 'msgpack-lite';
 
-function createWebSocket() {
+export function createWebSocket() {
 	let listeners = new Map<string, Set<(data?: unknown) => void>>();
 	const { subscribe, set } = writable(false);
 	const socketEvents = ['open', 'close', 'error', 'message', 'unresponsive'] as const;
 	type SocketEvent = (typeof socketEvents)[number];
 	let unresponsiveTimeoutId:  NodeJS.Timeout;
 	let reconnectTimeoutId:  NodeJS.Timeout;
-	let ws: WebSocket;
+	let ws: WebSocket | undefined;
 	let socketUrl: string | URL;
 	let event_use_json = false;
+	let generation = 0;
 
 	function init(url: string | URL, use_json: boolean = false) {
 		socketUrl = url;
@@ -18,9 +19,13 @@ function createWebSocket() {
 		connect();
 	}
 
-	function disconnect(reason: SocketEvent, event?: Event) {
+	function disconnect(socket: WebSocket, socketGeneration: number, reason: SocketEvent, event?: Event) {
+		if (ws !== socket || generation !== socketGeneration) return;
 		//console.log('disconnect', reason, event);
-		ws.close();
+		ws = undefined;
+		if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+			socket.close();
+		}
 		set(false);
 		clearTimeout(unresponsiveTimeoutId);
 		clearTimeout(reconnectTimeoutId);
@@ -29,20 +34,26 @@ function createWebSocket() {
 	}
 
 	function connect() {
+		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 		//console.log('connect');
-		ws = new WebSocket(socketUrl);
-		ws.binaryType = 'arraybuffer';
-		ws.onopen = (ev) => {
+		const socket = new WebSocket(socketUrl);
+		const socketGeneration = ++generation;
+		ws = socket;
+		socket.binaryType = 'arraybuffer';
+		socket.onopen = (ev) => {
+			if (ws !== socket || generation !== socketGeneration) return;
 			set(true);
 			clearTimeout(reconnectTimeoutId);
 			listeners.get('open')?.forEach((listener) => listener(ev));
 			for (const event of listeners.keys()) {
 				if (socketEvents.includes(event as SocketEvent)) continue;
+				if (!listeners.get(event)?.size) continue;
 				sendEvent('subscribe', event);
 			}
 		};
-		ws.onmessage = (message) => {
-			resetUnresponsiveCheck();
+		socket.onmessage = (message) => {
+			if (ws !== socket || generation !== socketGeneration) return;
+			resetUnresponsiveCheck(socket, socketGeneration);
 			let payload = message.data;
 
 			const binary = payload instanceof ArrayBuffer;
@@ -97,27 +108,32 @@ function createWebSocket() {
 				console.warn('[WebSocket] Missing "event" in non-binary payload:', payload);
  			}
 		};
-		ws.onerror = (ev) => disconnect('error', ev);
-		ws.onclose = (ev) => disconnect('close', ev);
+		socket.onerror = (ev) => disconnect(socket, socketGeneration, 'error', ev);
+		socket.onclose = (ev) => disconnect(socket, socketGeneration, 'close', ev);
 	}
 
 	function unsubscribe(event: string, listener?: (data: any) => void) {
 		let eventListeners = listeners.get(event);
 		if (!eventListeners) return;
 
-		if (!eventListeners.size) {
-			sendEvent('unsubscribe', event);
-		}
 		if (listener) {
-			eventListeners?.delete(listener);
+			eventListeners.delete(listener);
 		} else {
+			eventListeners.clear();
+		}
+
+		if (!eventListeners.size) {
+			if (!socketEvents.includes(event as SocketEvent)) sendEvent('unsubscribe', event);
 			listeners.delete(event);
 		}
 	}
 
-	function resetUnresponsiveCheck() {
+	function resetUnresponsiveCheck(socket: WebSocket, socketGeneration: number) {
 		clearTimeout(unresponsiveTimeoutId);
-		unresponsiveTimeoutId = setTimeout(() => disconnect('unresponsive'), 2000);
+		unresponsiveTimeoutId = setTimeout(
+			() => disconnect(socket, socketGeneration, 'unresponsive'),
+			2000
+		);
 	}
 
 	function send(msg: unknown) {
