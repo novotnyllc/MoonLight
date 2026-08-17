@@ -251,14 +251,24 @@ TEST_CASE("monitor reader keeps mapped buffer alive until its read completes") {
   layerP.reset();
   int* monitorBuffer = new int(95);
   std::promise<void> monitorEntered;
-  std::promise<void> releaseMonitor;
-  std::shared_future<void> releaseMonitorFuture(releaseMonitor.get_future());
+  std::promise<void> releaseSnapshot;
+  std::shared_future<void> releaseSnapshotFuture(releaseSnapshot.get_future());
+  std::promise<void> snapshotComplete;
+  std::future<void> snapshotCompleteFuture = snapshotComplete.get_future();
+  std::promise<void> releaseNetwork;
+  std::shared_future<void> releaseNetworkFuture(releaseNetwork.get_future());
 
   auto monitor = std::async(std::launch::async, [&]() {
-    LayerMappingReadGuard guard(layerP.mappingMutex);
-    monitorEntered.set_value();
-    releaseMonitorFuture.wait();
-    CHECK_EQ(*monitorBuffer, 95);
+    int snapshot = 0;
+    {
+      LayerMappingReadGuard guard(layerP.mappingMutex);
+      monitorEntered.set_value();
+      releaseSnapshotFuture.wait();
+      snapshot = *monitorBuffer;
+    }
+    snapshotComplete.set_value();
+    releaseNetworkFuture.wait();  // network emission is outside lifetime ownership
+    CHECK_EQ(snapshot, 95);
   });
   monitorEntered.get_future().wait();
 
@@ -268,9 +278,47 @@ TEST_CASE("monitor reader keeps mapped buffer alive until its read completes") {
     monitorBuffer = nullptr;
   });
   CHECK(remap.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
-  releaseMonitor.set_value();
-  CHECK(monitor.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  releaseSnapshot.set_value();
+  CHECK(snapshotCompleteFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
   CHECK(remap.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(monitor.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+  releaseNetwork.set_value();
+  CHECK(monitor.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+}
+
+TEST_CASE("stuck script is quiesced before frame reader releases to writer") {
+  layerP.reset();
+  std::atomic<bool> scriptRunning{true};
+  std::atomic<bool> scriptSchedulable{true};
+  std::atomic<bool> writerObservedQuiesced{false};
+  std::promise<void> frameEntered;
+  std::promise<void> triggerTimeout;
+  std::shared_future<void> timeoutFuture(triggerTimeout.get_future());
+
+  auto frame = std::async(std::launch::async, [&]() {
+    LayerMappingReadGuard frameGuard(layerP.mappingMutex);
+    frameEntered.set_value();
+    timeoutFuture.wait();
+    scriptSchedulable.store(false);
+    scriptRunning.store(false);  // synchronous runtime kill has returned
+  });
+  frameEntered.get_future().wait();
+
+  auto writer = std::async(std::launch::async, [&]() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    writerObservedQuiesced.store(!scriptRunning.load() && !scriptSchedulable.load());
+  });
+  while (layerP.mappingMutex.waitingWriterCountForTest() == 0) std::this_thread::yield();
+  CHECK(writer.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+  triggerTimeout.set_value();
+  CHECK(frame.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(writer.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+  CHECK(writerObservedQuiesced.load());
+
+  int futureSchedules = 0;
+  if (scriptSchedulable.load()) ++futureSchedules;
+  CHECK_EQ(futureSchedules, 0);
 }
 
 // ---------------------------------------------------------------------------

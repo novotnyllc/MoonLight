@@ -162,10 +162,13 @@ TaskHandle_t driverTaskHandle = nullptr;
             scriptsToSync = (scriptsToSync > notified ? scriptsToSync - notified : 0);
             timeouts = 0;
           } else if (++timeouts >= 10) {
-            // 🌙 1 second without any script completing a frame — script task likely dead or stuck.
-            // Force-reset to prevent effectTask from blocking forever (0 lps).
-            EXT_LOGW(ML_TAG, "scriptsToSync=%d after 1s timeout — forcing reset (script task dead?)", scriptsToSync);
-            scriptsToSync = 0;
+            EXT_LOGE(ML_TAG, "scriptsToSync=%d after 1s timeout — quiescing LiveScript tasks", scriptsToSync);
+            if (LiveScriptNode::quiesceTimedOutTasks()) {
+              scriptsToSync = 0;
+            } else {
+              EXT_LOGE(ML_TAG, "LiveScript quiescence incomplete; retaining frame lifetime guard");
+            }
+            timeouts = 0;
           }
         }
       }
