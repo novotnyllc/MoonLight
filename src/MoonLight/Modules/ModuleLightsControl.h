@@ -359,7 +359,7 @@ class ModuleLightsControl : public Module {
           entry["name"] = (const char*)file.path();
           entry["category"] = "LiveScript";
         }
-      });
+      }, false);
       rootFolder.close();
     }
   #endif
@@ -442,7 +442,7 @@ class ModuleLightsControl : public Module {
             }
             count++;
           }
-        });
+        }, false);
         rootFolder.close();
       }
       #endif

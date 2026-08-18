@@ -157,7 +157,7 @@ class ModuleDrivers : public NodeManager {
         entry["name"] = (const char*)file.path();
         entry["category"] = "LiveScript";
       }
-    });
+    }, false);
     rootFolder.close();
   #endif
   }

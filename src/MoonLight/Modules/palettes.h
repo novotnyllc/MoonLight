@@ -654,6 +654,7 @@ String getPaletteHexString(uint8_t index) {
   CRGBPalette16 palette = getGradientPalette(index);
   const byte* gpArray = gGradientPalettes[index];
   String hexString = "";
+  hexString.reserve(200);  // Avoid repeated internal-heap growth while building module definitions.
 
   if (gpArray[0] == 255) {  // fastled and moonlight palettes
     char buf[9];

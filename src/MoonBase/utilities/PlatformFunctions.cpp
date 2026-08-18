@@ -32,7 +32,7 @@ int getNextItemInArray(JsonArray array, size_t currentValue, bool backwards) {
   return array[next];
 }
 
-void walkThroughFiles(File folder, std::function<void(File, File)> fun) {
+void walkThroughFiles(File folder, std::function<void(File, File)> fun, bool recursive) {
   folder.rewindDirectory();
   while (true) {
     File file = folder.openNextFile();
@@ -40,8 +40,8 @@ void walkThroughFiles(File folder, std::function<void(File, File)> fun) {
 
     fun(folder, file);
 
-    if (file.isDirectory()) {
-      walkThroughFiles(file, fun);
+    if (recursive && file.isDirectory()) {
+      walkThroughFiles(file, fun, true);
     }
     file.close();
   }
