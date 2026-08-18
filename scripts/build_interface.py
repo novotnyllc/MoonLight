@@ -45,9 +45,10 @@ filesystem_dir = project_dir + "/data/www"
 
 
 def find_latest_timestamp_for_app():
-    return max(
-        (getmtime(f) for f in glob.glob(f"{source_www_dir}/**/*", recursive=True))
-    )
+    inputs = glob.glob(f"{source_www_dir}/**/*", recursive=True)
+    inputs += glob.glob(f"{interface_dir}/*.config.*")
+    inputs += glob.glob(f"{interface_dir}/package*.json")
+    return max(getmtime(f) for f in inputs if os.path.isfile(f))
 
 
 def should_regenerate_output_file():

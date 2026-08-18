@@ -5,6 +5,9 @@ import viteLittleFS from './vite-plugin-littlefs';
 import tailwindcss from '@tailwindcss/vite';
 
 const config: UserConfig = {
+	resolve: {
+		alias: { 'msgpack-lite': 'msgpack-lite/dist/msgpack.min.js' }
+	},
 	plugins: [
 		sveltekit(),
 		Icons({
@@ -32,13 +35,6 @@ const config: UserConfig = {
 	build: {
 		minify: 'terser',
 		sourcemap: false,
-		// rollupOptions: {
-		// 	output: {
-		// 		manualChunks(id) {
-		// 			if (id.includes('node_modules')) return 'vendor';
-		// 		}
-		// 	}
-		// },
 		cssCodeSplit: true
 	}
 };
