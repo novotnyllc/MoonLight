@@ -60,11 +60,13 @@ private:
 
     void syncState(const String &originId, bool sync = false)
     {
-        JsonDocument jsonDocument;
-        JsonObject root = jsonDocument.to<JsonObject>();
+        if (!sync && !_socket->hasBroadcastRecipient(_event, originId)) return;
+
+        JsonDocument jsonDocument(PsychicJsonAllocator::instance());
+        jsonDocument["event"] = _event;
+        JsonObject root = jsonDocument["data"].to<JsonObject>();
         _statefulService->read(root, _stateReader, originId); // 🌙 Add originId
-        JsonObject jsonObject = jsonDocument.as<JsonObject>();
-        _socket->emitEvent(_event, jsonObject, originId.c_str(), sync);
+        _socket->emitEvent(jsonDocument, originId.c_str(), sync);
     }
 };
 

@@ -124,7 +124,7 @@ esp_err_t PsychicJsonHandler::handleRequest(PsychicRequest *request)
 
       JsonVariant json = jsonBuffer.as<JsonVariant>();
     #else
-      JsonDocument jsonBuffer;
+      JsonDocument jsonBuffer(PsychicJsonAllocator::instance());
       DeserializationError error = deserializeJson(jsonBuffer, request->body());
       if (error)
         return request->reply(400);

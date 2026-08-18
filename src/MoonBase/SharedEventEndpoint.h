@@ -46,7 +46,9 @@ class SharedEventEndpoint {
 
  private:
   void syncState(Module* module, const String& originId, bool sync = false) {
-    JsonDocument doc;
+    if (!sync && !_socket->hasBroadcastRecipient(module->_moduleName, originId)) return;
+
+    JsonDocument doc(PsychicJsonAllocator::instance());
 
     // CHANGED: Use JsonObject overload, not buffer
     doc["event"] = module->_moduleName;

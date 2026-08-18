@@ -273,6 +273,18 @@ unsigned int EventSocket::getConnectedClients()
     return (unsigned int)_socket.count();
 }
 
+bool EventSocket::hasBroadcastRecipient(const String &event, const String &originId)
+{
+    xSemaphoreTake(clientSubscriptionsMutex, portMAX_DELAY);
+    auto subscriptions = client_subscriptions.find(event);
+    int originSubscriptionId = originId.toInt();
+    bool subscribed = subscriptions != client_subscriptions.end() &&
+                      std::any_of(subscriptions->second.begin(), subscriptions->second.end(),
+                                  [originSubscriptionId](int subscription) { return subscription != originSubscriptionId; });
+    xSemaphoreGive(clientSubscriptionsMutex);
+    return subscribed;
+}
+
 // 🌙 Client info / visibility / active clients
 
 void EventSocket::handleClientInfo(JsonObject &data, int originId)

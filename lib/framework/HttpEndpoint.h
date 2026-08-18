@@ -24,6 +24,7 @@ protected:
     AuthenticationPredicate _authenticationPredicate;
     PsychicHttpServer *_server;
     String _servicePath;
+    bool _readAfterUpdate;
 
 public:
     HttpEndpoint(JsonStateReader<T> stateReader,
@@ -32,13 +33,15 @@ public:
                  PsychicHttpServer *server,
                  const char *servicePath,
                  SecurityManager *securityManager,
-                 AuthenticationPredicate authenticationPredicate = AuthenticationPredicates::IS_ADMIN) : _stateReader(stateReader),
+                 AuthenticationPredicate authenticationPredicate = AuthenticationPredicates::IS_ADMIN,
+                 bool readAfterUpdate = true) : _stateReader(stateReader),
                                                                                                          _stateUpdater(stateUpdater),
                                                                                                          _statefulService(statefulService),
                                                                                                          _server(server),
                                                                                                          _servicePath(servicePath),
                                                                                                          _securityManager(securityManager),
-                                                                                                         _authenticationPredicate(authenticationPredicate)
+                                                                                                         _authenticationPredicate(authenticationPredicate),
+                                                                                                         _readAfterUpdate(readAfterUpdate)
     {
     }
 
@@ -94,6 +97,11 @@ public:
                             {
                                 // persist the changes to the FS
                                 _statefulService->callUpdateHandlers(HTTP_ENDPOINT_ORIGIN_ID);
+                            }
+
+                            if (!_readAfterUpdate)
+                            {
+                                return request->reply(200, "application/json", "{}");
                             }
 
                             PsychicJsonResponse response = PsychicJsonResponse(request, false);
