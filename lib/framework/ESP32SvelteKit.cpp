@@ -124,10 +124,10 @@ bool ESP32SvelteKit::begin()
                 response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
                 // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
                 size_t chunkSize = 512;
-                uint8_t *chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                uint8_t *chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
                 if (!chunk) {
                     chunkSize = 256;
-                    chunk = static_cast<uint8_t *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                    chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
                 }
                 if (!chunk) return PsychicResponse::sendServiceUnavailable(request);
                 response.sendHeaders();

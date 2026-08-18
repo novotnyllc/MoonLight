@@ -34,11 +34,11 @@ esp_err_t PsychicStreamResponse::beginSend()
 
   //Buffer to hold ChunkPrinter and stream buffer. Using placement new will keep us at a single allocation.
   size_t chunkSize = STREAM_CHUNK_SIZE;
-  _buffer = (uint8_t*)malloc(chunkSize + sizeof(ChunkPrinter));
+  _buffer = static_cast<uint8_t *>(allocateResponseBuffer(chunkSize + sizeof(ChunkPrinter)));
   if (!_buffer)
   {
     chunkSize = 256;
-    _buffer = (uint8_t*)malloc(chunkSize + sizeof(ChunkPrinter));
+    _buffer = static_cast<uint8_t *>(allocateResponseBuffer(chunkSize + sizeof(ChunkPrinter)));
   }
   
   if(!_buffer)
