@@ -45,10 +45,10 @@ esp_err_t PsychicJsonResponse::send()
   else
     buffer_size = JSON_INTERNAL_CHUNK_SIZE;
 
-  buffer = static_cast<char *>(heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  buffer = static_cast<char *>(allocateResponseBuffer(buffer_size));
   if (buffer == NULL && buffer_size > 256) {
     buffer_size = 256;
-    buffer = static_cast<char *>(heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    buffer = static_cast<char *>(allocateResponseBuffer(buffer_size));
   }
   if (buffer == NULL) {
     return sendServiceUnavailable(this->_request);

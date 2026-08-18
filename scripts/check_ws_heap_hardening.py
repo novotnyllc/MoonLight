@@ -5,6 +5,8 @@ source = (Path(__file__).parents[1] / "src/MoonBase/SharedWebSocketServer.h").re
 shared_event_source = (Path(__file__).parents[1] / "src/MoonBase/SharedEventEndpoint.h").read_text()
 request_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicRequest.cpp").read_text()
 json_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicJson.cpp").read_text()
+response_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicResponse.cpp").read_text()
+stream_response_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicStreamResponse.cpp").read_text()
 websocket_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicWebSocket.cpp").read_text()
 server_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicHttpServer.cpp").read_text()
 wifi_source = (Path(__file__).parents[1] / "lib/framework/WiFiSettingsService.cpp").read_text()
@@ -16,6 +18,7 @@ event_endpoint_source = (Path(__file__).parents[1] / "lib/framework/EventEndpoin
 websocket_server_source = (Path(__file__).parents[1] / "lib/framework/WebSocketServer.h").read_text()
 http_endpoint_source = (Path(__file__).parents[1] / "lib/framework/HttpEndpoint.h").read_text()
 file_manager_source = (Path(__file__).parents[1] / "src/MoonBase/Modules/FileManager.cpp").read_text()
+sveltekit_source = (Path(__file__).parents[1] / "lib/framework/ESP32SvelteKit.cpp").read_text()
 allocator = "JsonDocument doc(PsychicJsonAllocator::instance());"
 no_clients = "if (!client && _handler.count() == 0) return;"
 event_guard = "if (!sync && !_socket->hasBroadcastRecipient(_event, originId)) return;"
@@ -23,6 +26,12 @@ websocket_guard = "if (!client && _webSocket.count() == 0) return;"
 
 assert allocator in source, "WebSocket snapshots must allocate JSON in PSRAM"
 assert "JsonDocument jsonBuffer(PsychicJsonAllocator::instance());" in json_source, "JSON request bodies must prefer PSRAM"
+assert "JsonDocument doc(PsychicJsonAllocator::instance());" in event_socket_source, "Incoming event JSON must prefer PSRAM"
+assert "PsychicJsonAllocator::instance()->allocate(outputSize)" in event_socket_source, "Event payloads must prefer PSRAM"
+assert "static std::vector<uint8_t> outBuffer" not in event_socket_source, "Event payload capacity must not remain in internal RAM"
+assert "heap_caps_malloc_prefer(size, 2," in response_source, "Response buffers must prefer PSRAM"
+for response_user in (json_source, stream_response_source, sveltekit_source):
+    assert "allocateResponseBuffer(" in response_user
 assert allocator in shared_event_source, "Event snapshots must allocate JSON in PSRAM"
 shared_event_guard = "if (!sync && !_socket->hasBroadcastRecipient(module->_moduleName, originId)) return;"
 assert shared_event_guard in shared_event_source

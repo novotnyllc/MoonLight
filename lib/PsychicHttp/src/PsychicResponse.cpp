@@ -1,5 +1,6 @@
 #include "PsychicResponse.h"
 #include "PsychicRequest.h"
+#include <esp_heap_caps.h>
 #include <http_status.h>
 
 PsychicResponse::PsychicResponse(PsychicRequest *request) :
@@ -161,6 +162,13 @@ esp_err_t PsychicResponse::finishChunking()
 {
   /* Respond with an empty chunk to signal HTTP response completion */
   return httpd_resp_send_chunk(this->_request->request(), NULL, 0);
+}
+
+void *PsychicResponse::allocateResponseBuffer(size_t size)
+{
+  return heap_caps_malloc_prefer(size, 2,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
 esp_err_t PsychicResponse::sendServiceUnavailable(PsychicRequest *request)

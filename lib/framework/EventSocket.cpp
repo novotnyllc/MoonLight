@@ -64,7 +64,7 @@ esp_err_t EventSocket::onFrame(PsychicWebSocketRequest *request, httpd_ws_frame 
     ESP_LOGV(SVK_TAG, "ws[%s][%u] opcode[%d]", request->client()->remoteIP().toString().c_str(),
              request->client()->socket(), frame->type);
 
-    JsonDocument doc;
+    JsonDocument doc(PsychicJsonAllocator::instance());
 #if FT_ENABLED(EVENT_USE_JSON)
     if (frame->type == HTTPD_WS_TYPE_TEXT)
     {
@@ -139,25 +139,21 @@ void EventSocket::emitEvent(const JsonDocument &doc, const char *originId, bool 
         emitEvent(doc["event"], outBuffer.c_str(), outBuffer.length(), originId, onlyToSameOrigin);
     #else
         // --- MsgPack path ---
-        struct VecWriter {
-            std::vector<uint8_t> &v;
-            size_t write(uint8_t c) {
-                v.push_back(c);
-                return 1;
-            }
-            size_t write(const uint8_t *buf, size_t size) {
-                v.insert(v.end(), buf, buf + size);
-                return size;
-            }
-        };
+        size_t outputSize = measureMsgPack(doc);
+        uint8_t *outBuffer = static_cast<uint8_t *>(PsychicJsonAllocator::instance()->allocate(outputSize));
+        if (!outBuffer) {
+            ESP_LOGE(SVK_TAG, "Unable to allocate %zu-byte event buffer", outputSize);
+            xSemaphoreGive(eventSerializationMutex);
+            return;
+        }
 
-        static std::vector<uint8_t> outBuffer;   // reuse across calls
-        outBuffer.clear();                        // reset length but keep capacity
-        outBuffer.reserve(measureMsgPack(doc));// optional: pre-reserve based on measureMsgPack
-        VecWriter writer{outBuffer};
-        serializeMsgPack(doc, writer);
-
-        emitEvent(doc["event"], (char *)outBuffer.data(), outBuffer.size(), originId, onlyToSameOrigin);
+        size_t written = serializeMsgPack(doc, outBuffer, outputSize);
+        if (written == outputSize) {
+            emitEvent(doc["event"], (char *)outBuffer, written, originId, onlyToSameOrigin);
+        } else {
+            ESP_LOGE(SVK_TAG, "Event serialization wrote %zu of %zu bytes", written, outputSize);
+        }
+        PsychicJsonAllocator::instance()->deallocate(outBuffer);
     #endif
     xSemaphoreGive(eventSerializationMutex);
 }
