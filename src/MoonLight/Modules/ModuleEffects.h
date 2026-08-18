@@ -40,16 +40,13 @@ class ModuleEffects : public NodeManager {
 
   #if FT_ENABLED(FT_MONITOR)
     _sveltekit->getSocket()->registerEvent("monitor");
+    _sveltekit->getSocket()->onSubscribe("monitor", [this](const String&) { sendMonitorLayout(); });
     _server->on(
         "/rest/monitorLayout", HTTP_GET,
         _sveltekit->getSecurityManager()->wrapRequest(
-            [&](PsychicRequest* request) {
+            [this](PsychicRequest* request) {
               EXT_LOGV(ML_TAG, "rest monitor triggered");
-              LayerMappingGuard guard(layerP.mappingMutex);
-              layerP.pass = 1;
-              layerP.monitorPass = true;
-              layerP.mapLayout();
-              layerP.monitorPass = false;
+              sendMonitorLayout();
 
               PsychicJsonResponse response = PsychicJsonResponse(request, false);
               return response.send();
@@ -59,6 +56,19 @@ class ModuleEffects : public NodeManager {
 
     layerMgr.installReadHook();
   }
+
+  #if FT_ENABLED(FT_MONITOR)
+ private:
+  void sendMonitorLayout() {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    layerP.pass = 1;
+    layerP.monitorPass = true;
+    layerP.mapLayout();
+    layerP.monitorPass = false;
+  }
+
+ public:
+  #endif
 
   bool shouldLoadPersistedState() const override { return !safeModeMB; }
 
@@ -182,7 +192,7 @@ class ModuleEffects : public NodeManager {
     addNodeValue<RippleXZModifier>(control);
 
     // find all the .sc files on FS
-    File rootFolder = ESPFS.open("/");
+    File rootFolder = ESPFS.open("/livescripts");
     walkThroughFiles(rootFolder, [&](File folder, File file) {
       const char* fname = file.name();
       size_t len = strlen(fname);
@@ -193,7 +203,7 @@ class ModuleEffects : public NodeManager {
         entry["name"] = (const char*)file.path();
         entry["category"] = "LiveScript";
       }
-    }, false);
+    });
     rootFolder.close();
   }
 
