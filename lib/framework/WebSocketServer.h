@@ -136,7 +136,9 @@ private:
      */
     void transmitData(PsychicWebSocketClient *client, const String &originId)
     {
-        JsonDocument jsonDocument;
+        if (!client && _webSocket.count() == 0) return;
+
+        JsonDocument jsonDocument(PsychicJsonAllocator::instance());
         JsonObject root = jsonDocument.to<JsonObject>();
         String buffer;
 

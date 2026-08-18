@@ -50,6 +50,7 @@ public:
 
     unsigned int getConnectedClients();
     unsigned int getActiveClients();
+    bool hasBroadcastRecipient(const String &event, const String &originId);
 
 private:
     PsychicHttpServer *_server;

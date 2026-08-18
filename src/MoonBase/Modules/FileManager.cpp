@@ -159,7 +159,7 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
 
 FileManager::FileManager(PsychicHttpServer* server, ESP32SvelteKit* sveltekit)
     : _httpEndpoint(FilesState::read, FilesState::update, this, server, "/rest/FileManager",  //
-                    sveltekit->getSecurityManager(), AuthenticationPredicates::IS_AUTHENTICATED),
+                    sveltekit->getSecurityManager(), AuthenticationPredicates::IS_AUTHENTICATED, false),
       _eventEndpoint(FilesState::read, FilesState::update, this, sveltekit->getSocket(), "FileManager"),
       _webSocketServer(FilesState::read, FilesState::update, this, server, "/ws/FileManager", sveltekit->getSecurityManager(), AuthenticationPredicates::IS_AUTHENTICATED),
       _socket(sveltekit->getSocket()),

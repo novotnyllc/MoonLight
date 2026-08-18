@@ -12,6 +12,41 @@
 #ifndef ModuleLightsControl_h
 #define ModuleLightsControl_h
 
+#include <cstddef>
+#include <cstring>
+
+inline bool isPresetLabelWhitespace(char value) {
+  return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' || value == '\v';
+}
+
+inline void extractPresetDisplayLabel(char (&label)[20], const char* explicitLabel, const char* nodeName) {
+  label[0] = '\0';
+
+  if (explicitLabel) {
+    size_t begin = 0;
+    size_t end = std::strlen(explicitLabel);
+    while (begin < end && isPresetLabelWhitespace(explicitLabel[begin])) begin++;
+    while (end > begin && isPresetLabelWhitespace(explicitLabel[end - 1])) end--;
+    if (end > begin) {
+      size_t length = end - begin;
+      if (length > sizeof(label) - 1) length = sizeof(label) - 1;
+      std::memcpy(label, explicitLabel + begin, length);
+      label[length] = '\0';
+      return;
+    }
+  }
+
+  if (!nodeName) return;
+
+  size_t length = 0;
+  while (nodeName[length] && length < sizeof(label) - 1 && static_cast<unsigned char>(nodeName[length]) < 0x80) {
+    label[length] = nodeName[length];
+    length++;
+  }
+  while (length > 0 && label[length - 1] == ' ') length--;
+  label[length] = '\0';
+}
+
 #if FT_MOONLIGHT
 
   #include <vector>
@@ -526,19 +561,8 @@ class ModuleLightsControl : public Module {
         JsonDocument doc;
         if (!deserializeJson(doc, file)) {
           JsonArray nodes = doc["nodes"];
-          if (nodes.size() > 0) {
-            const char* nodeName = nodes[0]["name"];
-            if (nodeName) {
-              // Strip emoji tags: keep only ASCII chars before first emoji
-              int j = 0;
-              for (int i = 0; nodeName[i] && j < 19; i++) {
-                if ((uint8_t)nodeName[i] >= 0x80) break;  // stop at first emoji/unicode
-                label[j++] = nodeName[i];
-              }
-              while (j > 0 && label[j - 1] == ' ') j--;  // trim trailing spaces
-              label[j] = '\0';
-            }
-          }
+          const char* nodeName = nodes.size() > 0 ? nodes[0]["name"].as<const char*>() : nullptr;
+          extractPresetDisplayLabel(label, doc["label"].as<const char*>(), nodeName);
         }
 
         _state.data["preset"]["labels"].add((const char*)label);
