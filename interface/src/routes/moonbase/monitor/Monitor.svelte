@@ -12,6 +12,8 @@
 	import { normalizePosition } from './monitor';
 	import SettingsCard from '$lib/components/SettingsCard.svelte';
 	import { socket } from '$lib/stores/socket';
+	import { user } from '$lib/stores/user';
+	import { page } from '$app/state';
 	import ControlIcon from '~icons/tabler/adjustments';
 
 	let el: HTMLCanvasElement;
@@ -20,23 +22,26 @@
 	let height = -1;
 	let depth = -1;
 
-	let done = false; //temp to show one instance of monitor data receiced
-
 	//ask the server to run the mapping, the resulting positions are sent by websocket monitor
 	const requestLayout = async () => {
-		// try {
-		const response = await fetch('/rest/monitorLayout', {
-			method: 'GET',
-			headers: {
-				'Content-Type': 'application/json'
-			}
-		});
-		console.log('requestLayout submitted');
-		const arrayBuffer = await response.json();
-		console.log('requestLayout received', arrayBuffer);
-		// } catch (error) {
-		// 	console.error('Error:', error);
-		// }
+		try {
+			const response = await fetch('/rest/monitorLayout', {
+				method: 'GET',
+				headers: {
+					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic',
+					'Content-Type': 'application/json'
+				}
+			});
+			if (!response.ok) throw new Error(`Monitor layout request failed: ${response.status}`);
+			await response.json();
+		} catch (error) {
+			console.error('Monitor layout request failed', error);
+		}
+	};
+
+	const handleOpen = () => {
+		isPositions = false;
+		void requestLayout();
 	};
 
 	const handleMonitor = (data: Uint8Array) => {
@@ -118,11 +123,6 @@
 	};
 
 	const handleChannels = (channels: Uint8Array) => {
-		if (!done) {
-			requestLayout(); //ask for positions
-			console.log('Monitor.handleChannels', channels);
-			done = true;
-		}
 		clearColors();
 		const groupSize = 20 * channelsPerLight; // RGB2040 groups: 20 lights per physical group (will be 3 channelsPerLight)
 		//max size supported is 255x255x255 (index < width * height * depth) ... todo: only any of the component < 255
@@ -146,11 +146,14 @@
 	onMount(() => {
 		console.log('onMount Monitor');
 		socket.on('monitor', handleMonitor);
+		socket.on('open', handleOpen);
+		void requestLayout();
 	});
 
 	onDestroy(() => {
 		console.log('onDestroy Monitor');
 		socket.off('monitor', handleMonitor);
+		socket.off('open', handleOpen);
 	});
 </script>
 

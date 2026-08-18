@@ -3,6 +3,7 @@
 	import InputPassword from '$lib/components/InputPassword.svelte';
 	import { user } from '$lib/stores/user';
 	import { notifications } from '$lib/components/toasts/notifications';
+	import { invalidateAll } from '$app/navigation';
 	import { fade, fly } from 'svelte/transition';
 	import Login from '~icons/tabler/login';
 
@@ -35,6 +36,7 @@
 				let username = $user.username;
 				notifications.success('User ' + username + ' signed in', 5000);
 				signIn();
+				await invalidateAll();
 			} else {
 				username = '';
 				password = '';

@@ -6,9 +6,6 @@
 #include "PsychicWebSocket.h"
 #include "PsychicJson.h"
 #include "WiFi.h"
-#include <errno.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
 
 PsychicHttpServer::PsychicHttpServer() :
   _onOpen(NULL),
@@ -228,13 +225,6 @@ void PsychicHttpServer::onOpen(PsychicClientCallback handler) {
 esp_err_t PsychicHttpServer::openCallback(httpd_handle_t hd, int sockfd)
 {
   ESP_LOGD(PH_TAG, "New client connected %d", sockfd);
-
-  // ESP-IDF emits response headers and bodies through multiple send() calls.
-  // Disable Nagle so the final partial TCP segment is not stranded on a
-  // persistent HTTP/1.1 connection while waiting for more application data.
-  int noDelay = 1;
-  if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay)) < 0)
-    ESP_LOGW(PH_TAG, "Unable to enable TCP_NODELAY on client %d (%d)", sockfd, errno);
 
   //get our global server reference
   PsychicHttpServer *server = (PsychicHttpServer*)httpd_get_global_user_ctx(hd);

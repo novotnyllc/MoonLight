@@ -1,0 +1,15 @@
+#pragma once
+
+// Arduino's supported static-buffer API uses WIFI_INIT_CONFIG_DEFAULT().
+// Override the precompiled SDK defaults before esp_wifi.h expands that macro.
+#include "sdkconfig.h"
+
+#undef CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER
+#undef CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM
+#undef CONFIG_ESP_WIFI_STATIC_TX_BUFFER
+#undef CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM
+#undef CONFIG_ESP_WIFI_TX_BUFFER_TYPE
+
+#define CONFIG_ESP_WIFI_STATIC_TX_BUFFER 1
+#define CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 8
+#define CONFIG_ESP_WIFI_TX_BUFFER_TYPE 0

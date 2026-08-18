@@ -105,7 +105,7 @@ int getNextItemInArray(JsonArray array, size_t currentValue, bool backwards = fa
 
 // file functions
 
-void walkThroughFiles(File folder, std::function<void(File, File)> fun);
+void walkThroughFiles(File folder, std::function<void(File, File)> fun, bool recursive = true);
 
 bool copyFile(const char* srcPath, const char* dstPath);
 

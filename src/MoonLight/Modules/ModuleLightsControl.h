@@ -349,7 +349,7 @@ class ModuleLightsControl : public Module {
   #if FT_LIVESCRIPT
     // find palette live scripts (P_*.sc files) on FS
     {
-      File rootFolder = ESPFS.open("/");
+      File rootFolder = ESPFS.open("/livescripts");
       walkThroughFiles(rootFolder, [&](File folder, File file) {
         const char* fname = file.name();
         size_t len = strlen(fname);
@@ -427,7 +427,7 @@ class ModuleLightsControl : public Module {
         // LiveScript palette — find the P_ script by index offset
         uint8_t palScriptIndex = index - nrOfHardcodedPalettes;
         uint8_t count = 0;
-        File rootFolder = ESPFS.open("/");
+        File rootFolder = ESPFS.open("/livescripts");
         walkThroughFiles(rootFolder, [&](File folder, File file) {
           const char* fname = file.name();
           size_t len = strlen(fname);

@@ -146,7 +146,7 @@ class ModuleDrivers : public NodeManager {
 
   #if FT_LIVESCRIPT
     // find layout/driver live scripts (.sc files with L_ or D_ prefix) on FS
-    File rootFolder = ESPFS.open("/");
+    File rootFolder = ESPFS.open("/livescripts");
     walkThroughFiles(rootFolder, [&](File folder, File file) {
       const char* fname = file.name();
       size_t len = strlen(fname);

@@ -44,12 +44,12 @@ export function createWebSocket() {
 			if (ws !== socket || generation !== socketGeneration) return;
 			set(true);
 			clearTimeout(reconnectTimeoutId);
-			listeners.get('open')?.forEach((listener) => listener(ev));
 			for (const event of listeners.keys()) {
 				if (socketEvents.includes(event as SocketEvent)) continue;
 				if (!listeners.get(event)?.size) continue;
 				sendEvent('subscribe', event);
 			}
+			listeners.get('open')?.forEach((listener) => listener(ev));
 		};
 		socket.onmessage = (message) => {
 			if (ws !== socket || generation !== socketGeneration) return;
