@@ -17,6 +17,8 @@
 #include <ConfigRecovery.h>
 
 #include <esp32-hal.h>
+#include <esp_image_format.h>
+#include <esp_ota_ops.h>
 
 #if CONFIG_IDF_TARGET_ESP32 // ESP32/PICO-D4
 #include "esp32/rom/rtc.h"
@@ -136,6 +138,17 @@ SystemStatus::SystemStatus(PsychicHttpServer *server,
 
 void SystemStatus::begin()
 {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running)
+    {
+        const esp_partition_pos_t position = {.offset = running->address, .size = running->size};
+        esp_image_metadata_t metadata = {};
+        if (esp_image_get_metadata(&position, &metadata) == ESP_OK)
+        {
+            _sketchSize = metadata.image_len;
+        }
+    }
+
     _server->on(SYSTEM_STATUS_SERVICE_PATH,
                 HTTP_GET,
                 _securityManager->wrapRequest(std::bind(&SystemStatus::systemStatus, this, std::placeholders::_1),
@@ -178,7 +191,7 @@ esp_err_t SystemStatus::systemStatus(PsychicRequest *request)
     root["used_heap"] = ESP.getHeapSize() - ESP.getFreeHeap();
     root["total_heap"] = ESP.getHeapSize();
     root["min_free_heap"] = ESP.getMinFreeHeap();
-    root["sketch_size"] = ESP.getSketchSize();
+    root["sketch_size"] = _sketchSize;
     root["free_sketch_space"] = ESP.getFreeSketchSpace();
     root["sdk_version"] = ESP.getSdkVersion();
     root["arduino_version"] = ARDUINO_VERSION;

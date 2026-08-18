@@ -19,6 +19,8 @@ websocket_server_source = (Path(__file__).parents[1] / "lib/framework/WebSocketS
 http_endpoint_source = (Path(__file__).parents[1] / "lib/framework/HttpEndpoint.h").read_text()
 file_manager_source = (Path(__file__).parents[1] / "src/MoonBase/Modules/FileManager.cpp").read_text()
 sveltekit_source = (Path(__file__).parents[1] / "lib/framework/ESP32SvelteKit.cpp").read_text()
+system_status_header = (Path(__file__).parents[1] / "lib/framework/SystemStatus.h").read_text()
+system_status_source = (Path(__file__).parents[1] / "lib/framework/SystemStatus.cpp").read_text()
 allocator = "JsonDocument doc(PsychicJsonAllocator::instance());"
 no_clients = "if (!client && _handler.count() == 0) return;"
 event_guard = "if (!sync && !_socket->hasBroadcastRecipient(_event, originId)) return;"
@@ -79,3 +81,9 @@ assert "JsonDocument jsonDocument(PsychicJsonAllocator::instance());" in websock
 assert 'if (!_readAfterUpdate)' in http_endpoint_source
 assert 'return request->reply(200, "application/json", "{}");' in http_endpoint_source
 assert 'AuthenticationPredicates::IS_AUTHENTICATED, false)' in file_manager_source
+assert "uint32_t _sketchSize = 0;" in system_status_header
+assert "esp_image_get_metadata(&position, &metadata)" in system_status_source
+assert "_sketchSize = metadata.image_len;" in system_status_source
+assert "ESP.getSketchSize()" not in system_status_source, "System status must not re-enter the hardware SHA engine"
+status_handler = system_status_source.index("esp_err_t SystemStatus::systemStatus")
+assert "ESP.getSketchSize()" not in system_status_source[status_handler:], "Live status requests must not re-enter the hardware SHA engine"
