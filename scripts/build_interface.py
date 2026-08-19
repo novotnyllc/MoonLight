@@ -23,11 +23,6 @@ import mimetypes
 import glob
 from datetime import datetime
 
-try:
-    import brotli
-except ImportError:
-    brotli = None
-
 # Already-compressed or binary assets: embed raw bytes (no Content-Encoding).
 SKIP_COMPRESS_SUFFIXES = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2",
@@ -90,11 +85,8 @@ def should_compress_asset(asset_path: str) -> bool:
 def compress_asset_bytes(asset_path: str, raw: bytes) -> tuple[bytes, str]:
     if not should_compress_asset(asset_path):
         return raw, ""
-    if brotli is None:
-        raise RuntimeError(
-            "brotli package required for EMBED_WWW builds. Install with: pip install brotli"
-        )
-    return brotli.compress(raw, quality=11), "br"
+    # ponytail: gzip not brotli — ESP embeds one encoding; br breaks clients without br decode
+    return gzip.compress(raw, compresslevel=9), "gzip"
 
 
 def flag_exists(flag):
