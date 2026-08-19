@@ -94,6 +94,9 @@ ESP32SvelteKit esp32sveltekit(&server, NROF_END_POINTS);  // 🌙 pio variable
   #include "MoonBase/Modules/ModuleIO.h"
   #include "MoonBase/Modules/ModuleTasks.h"
   #include "MoonBase/GoldenConfig.h"
+  #ifdef ML_WEARABLE_FIELD_BOOT
+    #include "MoonBase/WearableBootRecovery.h"
+  #endif
 
 FileManager fileManager = FileManager(&server, &esp32sveltekit);
 ModuleTasks moduleTasks = ModuleTasks(&server, &esp32sveltekit);
@@ -373,10 +376,15 @@ void setup() {
   }
 #endif
 
+#ifdef ML_WEARABLE_FIELD_BOOT
+  wearableRecordBootResetReason();
+  // Field wearables: panic reboot loads normal floppy config; safe mode is opt-in via Button_1 @ boot only.
+#else
   if (esp_reset_reason() != ESP_RST_UNKNOWN && esp_reset_reason() != ESP_RST_POWERON && esp_reset_reason() != ESP_RST_SW && esp_reset_reason() != ESP_RST_USB) {  // see verbosePrintResetReason
     // ESP_RST_USB is after usb flashing! since esp-idf5
     safeModeMB = true;
   }
+#endif
 
   // start ESP32-SvelteKit
   if (!esp32sveltekit.begin()) {
@@ -422,9 +430,20 @@ void setup() {
 // MoonBase
 #if FT_ENABLED(FT_MOONBASE)
   fileManager.begin();
+#ifdef ML_WEARABLE_FIELD_BOOT
+  bool autoGoldenRestore = false;
+  if (!bootGoldenRestoreRequested && wearableShouldOfferAutoGoldenRestore() && goldenConfigPresent()) {
+    bootGoldenRestoreRequested = true;
+    autoGoldenRestore = true;
+    ESP_LOGW(ML_TAG, "Auto golden restore after %u unstable boots", WEARABLE_PANIC_BOOT_THRESHOLD);
+  }
+#endif
   if (bootGoldenRestoreRequested) {
     if (goldenRestoreSnapshot()) {
       ESP_LOGW(ML_TAG, "Restored golden configuration from %s", GOLDEN_CONFIG_LOGICAL);
+#ifdef ML_WEARABLE_FIELD_BOOT
+      if (autoGoldenRestore) wearableMarkAutoGoldenRestoreUsed();
+#endif
     } else {
       ESP_LOGE(ML_TAG, "Golden restore requested at boot but snapshot restore failed");
     }
@@ -485,6 +504,10 @@ void setup() {
         lastSecond = millis();
 
         for (Module* module : modules) module->loop1s();
+
+#ifdef ML_WEARABLE_FIELD_BOOT
+        wearableMaybeMarkStable(millis());
+#endif
 
         // every 10 seconds
         static unsigned long last10Second = 0;

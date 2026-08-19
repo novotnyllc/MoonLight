@@ -55,8 +55,13 @@ JsonObject Node::setupControl(const char* name, const char* type, int min, int m
       EXT_LOGE(MB_TAG, "type for %s is not Coord3D", name);
     else
       control["size"] = sizeof(Coord3D);
-  } else
-    EXT_LOGE(MB_TAG, "type of %s not compatible: %s (%d)", control["name"].as<const char*>(), control["type"].as<const char*>(), control["size"].as<uint8_t>());
+  } else {
+    const char* controlName = name;
+    if (!control["name"].isNull()) controlName = control["name"].as<const char*>();
+    if (!controlName) controlName = "?";
+    EXT_LOGE(MB_TAG, "type of %s not compatible: %s (%d)", controlName, type, static_cast<int>(control["size"].as<uint8_t>()));
+    return control;
+  }
 
   if (newControl) {
     onUpdate(control);  // custom onUpdate for the node
