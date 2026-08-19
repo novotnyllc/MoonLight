@@ -74,6 +74,27 @@ TEST_CASE("mDNS maintenance queues enable and announce atomically") {
   CHECK_EQ(action, enableIp4 | announceIp4);
 }
 
+TEST_CASE("mDNS restart when started but never announced or stale") {
+  CHECK_FALSE(mdnsShouldRestart(false, false, true, 4096, 100000, 0, 120000, 2048));
+  CHECK(mdnsShouldRestart(true, false, true, 4096, 100000, 0, 120000, 2048));
+  CHECK_FALSE(mdnsShouldRestart(true, false, true, 1024, 100000, 0, 120000, 2048));
+  CHECK(mdnsShouldRestart(true, false, true, 4096, 250000, 100000, 120000, 2048));
+  CHECK_FALSE(mdnsShouldRestart(true, false, true, 4096, 150000, 100000, 120000, 2048));
+}
+
+TEST_CASE("mDNS maintenance interval speeds up during recovery") {
+  CHECK_EQ(mdnsMaintainIntervalMs(false, 1000, 0, 60000, 15000, 120000), 15000U);
+  CHECK_EQ(mdnsMaintainIntervalMs(true, 1000, 0, 60000, 15000, 120000), 15000U);
+  CHECK_EQ(mdnsMaintainIntervalMs(true, 250000, 100000, 60000, 15000, 120000), 15000U);
+  CHECK_EQ(mdnsMaintainIntervalMs(true, 150000, 100000, 60000, 15000, 120000), 60000U);
+}
+
+TEST_CASE("mDNS announce success requires both enable and announce") {
+  CHECK(mdnsAnnounceSucceeded(0, 0));
+  CHECK_FALSE(mdnsAnnounceSucceeded(0, 1));
+  CHECK_FALSE(mdnsAnnounceSucceeded(1, 0));
+}
+
 TEST_CASE("gcd") {
   CHECK_EQ(gcd(12, 18), 6);
   CHECK_EQ(gcd(7, 13), 1);

@@ -32,3 +32,29 @@ inline bool mdnsShouldAnnounce(bool alreadyStarted, bool safeMode, bool wifiConn
 {
     return alreadyStarted && !safeMode && wifiConnected && largestInternal >= minInternal;
 }
+
+inline bool mdnsAnnounceSucceeded(int enableResult, int announceResult)
+{
+    return enableResult == 0 && announceResult == 0;
+}
+
+// Started but never announced, or no successful announce within staleMs — restart the responder.
+inline bool mdnsShouldRestart(bool alreadyStarted, bool safeMode, bool wifiConnected, size_t largestInternal,
+                              uint32_t now, uint32_t lastAnnounceOk, uint32_t staleMs, size_t minRestartInternal)
+{
+    if (!alreadyStarted || safeMode || !wifiConnected || largestInternal < minRestartInternal)
+        return false;
+    if (lastAnnounceOk == 0)
+        return true;
+    return (now - lastAnnounceOk) > staleMs;
+}
+
+inline uint32_t mdnsMaintainIntervalMs(bool alreadyStarted, uint32_t now, uint32_t lastAnnounceOk,
+                                       uint32_t healthyIntervalMs, uint32_t recoveryIntervalMs, uint32_t staleMs)
+{
+    if (!alreadyStarted)
+        return recoveryIntervalMs;
+    if (lastAnnounceOk == 0 || (now - lastAnnounceOk) > staleMs)
+        return recoveryIntervalMs;
+    return healthyIntervalMs;
+}
