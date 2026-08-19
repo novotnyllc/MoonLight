@@ -13,9 +13,7 @@
  **/
 
 #include <ESP32SvelteKit.h>
-#include <ConfigRecovery.h>
 #include <MdnsRegistrationPolicy.h>
-#include <RecoveryPolicy.h>
 #include <esp_heap_caps.h>
 
 //🌙 added to telemetry
@@ -79,14 +77,6 @@ bool ESP32SvelteKit::begin()
 {
     ESP_LOGV(SVK_TAG, "Loading settings from files system");
     ESPFS.begin(true);
-#ifdef CONFIG_RECOVERY_ENABLED
-    if (!ConfigRecovery::begin(&ESPFS, esp_reset_reason())) {
-        safeModeMB = true;
-        ESP_LOGE(SVK_TAG, "Configuration recovery failed; settings initialization blocked");
-        return false;
-    }
-    if (ConfigRecovery::restoredThisBoot()) safeModeMB = false;
-#endif
 
 #if FT_ENABLED(FT_WIFI) // 🌙
     // 🌙 Load WiFi state early so getSystemHostname() returns the configured hostname
@@ -123,8 +113,12 @@ bool ESP32SvelteKit::begin()
                 response.addHeader("Content-Encoding", "gzip");
                 response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
                 // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
-                size_t chunkSize = 512;
+                size_t chunkSize = 4096;
                 uint8_t *chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
+                if (!chunk) {
+                    chunkSize = 1024;
+                    chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
+                }
                 if (!chunk) {
                     chunkSize = 256;
                     chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
@@ -183,42 +177,7 @@ bool ESP32SvelteKit::begin()
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Credentials", "true");
 #endif
 
-    String mdnsHostname = getSystemHostname();
-    mdnsHostname.toLowerCase();
-    if (safeModeMB)
-    {
-        ESP_LOGW(SVK_TAG, "Safe mode enabled; mDNS disabled until the next clean boot");
-    }
-    else if (MDNS.begin(mdnsHostname.c_str()))
-    {
-        MDNS.setInstanceName(mdnsHostname);
-        MDNS.addService("http", "tcp", 80);
-        MDNS.addService("ws", "tcp", 80);
-        MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
-        auto announceMdnsSta = []() {
-            esp_netif_t *netif = WiFi.STA.netif();
-            if (netif)
-            {
-                maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
-                                [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
-            }
-        };
-        registerMdnsStaGotIp(
-            [](auto announce) {
-                WiFi.onEvent(
-                    [announce](WiFiEvent_t, WiFiEventInfo_t) {
-                        announce();
-                    },
-                    WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
-            },
-            []() { return WiFi.isConnected(); },
-            announceMdnsSta);
-        ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
-    }
-    else
-    {
-        ESP_LOGE(SVK_TAG, "mDNS failed to start for %s", mdnsHostname.c_str());
-    }
+    ensureMdns();
 
 #ifdef SERIAL_INFO
     Serial.printf("Running Firmware Version: %s\n", APP_VERSION);
@@ -314,6 +273,79 @@ bool ESP32SvelteKit::begin()
     return true;
 }
 
+bool ESP32SvelteKit::startMdns()
+{
+    if (_mdnsStarted || safeModeMB)
+        return _mdnsStarted;
+
+    String mdnsHostname = getSystemHostname();
+    mdnsHostname.toLowerCase();
+    if (!MDNS.begin(mdnsHostname.c_str()))
+    {
+        ESP_LOGE(SVK_TAG, "mDNS failed to start for %s", mdnsHostname.c_str());
+        return false;
+    }
+
+    MDNS.setInstanceName(mdnsHostname);
+    MDNS.addService("http", "tcp", 80);
+    MDNS.addService("ws", "tcp", 80);
+    MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+    auto announceMdnsSta = []() {
+        esp_netif_t *netif = WiFi.STA.netif();
+        if (netif)
+        {
+            maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
+                            [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
+        }
+    };
+    registerMdnsStaGotIp(
+        [](auto announce) {
+            WiFi.onEvent(
+                [announce](WiFiEvent_t, WiFiEventInfo_t) {
+                    announce();
+                },
+                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+        },
+        []() { return WiFi.isConnected(); },
+        announceMdnsSta);
+    _mdnsStarted = true;
+    ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
+    return true;
+}
+
+void ESP32SvelteKit::ensureMdns()
+{
+    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (mdnsShouldStartAtBoot(_mdnsStarted, safeModeMB, largestInternal, 1024))
+        startMdns();
+}
+
+void ESP32SvelteKit::maintainMdns()
+{
+    if (safeModeMB || !WiFi.isConnected())
+        return;
+
+    const uint32_t now = millis();
+    if (_lastMdnsMaintain && (uint32_t)(now - _lastMdnsMaintain) < 60000UL)
+        return;
+    _lastMdnsMaintain = now;
+
+    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (mdnsShouldStart(_mdnsStarted, safeModeMB, true, largestInternal, 1024))
+    {
+        startMdns();
+        return;
+    }
+    if (!mdnsShouldAnnounce(_mdnsStarted, safeModeMB, true, largestInternal, 4096))
+        return;
+
+    esp_netif_t *netif = WiFi.STA.netif();
+    if (!netif)
+        return;
+    maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
+                    [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
+}
+
 void ESP32SvelteKit::_loop()
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -332,6 +364,7 @@ void ESP32SvelteKit::_loop()
         wifi_eth_combined = false;
 #if FT_ENABLED(FT_WIFI) // 🌙
         _wifiSettingsService.loop(); // 30 seconds
+        maintainMdns();
         _apSettingsService.loop();   // 10 seconds
 #endif
 #if FT_ENABLED(FT_MQTT)
@@ -380,10 +413,6 @@ void ESP32SvelteKit::_loop()
         {
             function();
         }
-
-#ifdef CONFIG_RECOVERY_ENABLED
-        ConfigRecovery::loop(!safeModeMB && recoveryConnectivityHealthy(wifi_eth_combined, ap, event) && lps_all_snapshot > 0);
-#endif
 
         static int lastTime = 0;
         if (millis() - lastTime > 1000)

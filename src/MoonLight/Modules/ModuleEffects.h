@@ -14,6 +14,7 @@
 
 #if FT_MOONLIGHT
 
+  #include <cstring>
   #include "FastLED.h"
   #include "MoonBase/NodeManager.h"
   #include "MoonLight/Layers/LayerManager.h"
@@ -60,11 +61,34 @@ class ModuleEffects : public NodeManager {
   #if FT_ENABLED(FT_MONITOR)
  private:
   void sendMonitorLayout() {
-    LayerMappingGuard guard(layerP.mappingMutex);
-    layerP.pass = 1;
-    layerP.monitorPass = true;
-    layerP.mapLayout();
-    layerP.monitorPass = false;
+    LightsHeader header{};
+    std::vector<uint8_t, VectorRAMAllocator<uint8_t>> positions;
+    bool captured = false;
+    {
+      LayerMappingGuard guard(layerP.mappingMutex);
+      layerP.pass = 1;
+      layerP.monitorPass = true;
+      layerP.mapLayout();
+      layerP.monitorPass = false;
+
+      extern SemaphoreHandle_t swapMutex;
+      xSemaphoreTake(swapMutex, portMAX_DELAY);
+      if (layerP.lights.header.isPositions == 2 && layerP.lights.channelsD && layerP.lights.header.nrOfLights) {
+        header = layerP.lights.header;
+        const size_t positionBytes = static_cast<size_t>(header.nrOfLights) * 3;
+        positions.resize(positionBytes);
+        memcpy(positions.data(), layerP.lights.channelsD, positionBytes);
+        memset(layerP.lights.channelsD, 0, positionBytes);
+        layerP.lights.header.isPositions = 3;
+        captured = true;
+      }
+      xSemaphoreGive(swapMutex);
+    }
+    layerP.requestMapVirtual.store(true);
+    if (captured) {
+      _moduleLightsControl->storeMonitorLayout(header, positions.data(), positions.size());
+    }
+    _moduleLightsControl->emitStoredMonitorLayout();
   }
 
  public:
@@ -108,6 +132,9 @@ class ModuleEffects : public NodeManager {
     addNodeValue<StarSkyEffect>(control);
     addNodeValue<VUMeterEffect>(control);
     addNodeValue<WaveEffect>(control);
+    addNodeValue<WraparoundRacersEffect>(control);
+    addNodeValue<CrossingSpiralEffect>(control);
+    addNodeValue<HorizonRingEffect>(control);
 
     // MoonModules effects, alphabetically
     addNodeValue<GameOfLifeEffect>(control);
@@ -238,6 +265,9 @@ class ModuleEffects : public NodeManager {
     if (!node) node = checkAndAlloc<StarSkyEffect>(name);
     if (!node) node = checkAndAlloc<VUMeterEffect>(name);
     if (!node) node = checkAndAlloc<WaveEffect>(name);
+    if (!node) node = checkAndAlloc<WraparoundRacersEffect>(name);
+    if (!node) node = checkAndAlloc<CrossingSpiralEffect>(name);
+    if (!node) node = checkAndAlloc<HorizonRingEffect>(name);
 
     // MoonModules effects, alphabetically
     if (!node) node = checkAndAlloc<GameOfLifeEffect>(name);

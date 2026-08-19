@@ -281,18 +281,8 @@ bool sendAnalytics() {
 void WiFiSettingsService::loop()
 {
     unsigned long currentMillis = millis();
-    static unsigned long lastMdnsAnnounce = 0;
-
-    if (!safeModeMB && WiFi.isConnected() && (unsigned long)(currentMillis - lastMdnsAnnounce) >= 60000UL)
-    {
-        lastMdnsAnnounce = currentMillis;
-        esp_netif_t *netif = WiFi.STA.netif();
-        if (netif)
-        {
-            maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
-                            [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
-        }
-    }
+    // mDNS start/retry/announce lives in ESP32SvelteKit::maintainMdns().
+    // This loop used to call mdns_netif_action even when MDNS.begin() failed.
 
     // Handle delayed reconnection
     if (_delayedReconnectPending && currentMillis >= _delayedReconnectTime)

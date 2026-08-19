@@ -60,6 +60,20 @@ hide:
 
 ---
 
+## Wearables fork (novotnyllc)
+
+This branch is the **Dig-Next-2 / wearable MoonLight** line for ESP32 Pico boards with PSRAM (White Vest 95 and similar layouts). It tracks upstream MoonLight on `main`, but adds stability and product work needed for battery-powered wearables:
+
+- **DMA-safe preset switching** — RAM cache + built-in vest presets; no `fopen` on the click path
+- **Reliable floppy save** — atomic POSIX writes for module config under memory pressure
+- **HTTP/WebSocket hardening** — PSRAM-first JSON/chunks, socket lifecycle cleanup, bounded HTTP worker stalls
+- **Dig-Next-2 defaults** — lights-on-at-boot option (`bootLightsOn`), soft blackout buttons, compiled White Vest 95 map, custom effects (Horizon Ring, Crossing Spiral, Wraparound Racers, etc.)
+- **No config-recovery rollback** — last floppy save wins; recovery snapshot machinery removed from this branch
+
+Firmware profile: `esp32-d0-pico2` → version `1.0.1-dignext2.*`. Use the `wearables` branch for field firmware; use `main` for upstream MoonModules parity.
+
+---
+
 ## 🎯 Why Choose MoonLight?
 
 **MoonLight bridges the gap between hobbyist lighting projects and professional lighting systems.** Get enterprise-grade performance and flexibility without the enterprise price tag.

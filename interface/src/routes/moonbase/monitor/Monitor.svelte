@@ -70,7 +70,7 @@
 	const lightPreset_RGB2040 = 10;
 
 	const handleHeader = (header: Uint8Array) => {
-		let view = new DataView(header.buffer);
+		let view = new DataView(header.buffer, header.byteOffset, header.byteLength);
 
 		// let isPositions:number = header[6];
 		isPositions = true; //(header[6] >> 0) & 0x3; // bits 0-1
@@ -145,6 +145,8 @@
 
 	onMount(() => {
 		console.log('onMount Monitor');
+		createScene(el);
+		updateScene();
 		socket.on('monitor', handleMonitor);
 		socket.on('open', handleOpen);
 		void requestLayout();

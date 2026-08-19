@@ -142,8 +142,6 @@ esp_err_t PsychicResponse::sendChunk(uint8_t *chunk, size_t chunksize)
 {
   /* Send the buffer contents as HTTP response chunk */
   esp_err_t err = httpd_resp_send_chunk(this->_request->request(), (char *)chunk, chunksize);
-  if (err == ESP_OK)
-    vTaskDelay(1);
   if (err != ESP_OK)
   {
     ESP_LOGE(PH_TAG, "File sending failed (%s)", esp_err_to_name(err));

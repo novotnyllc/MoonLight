@@ -21,6 +21,7 @@ file_manager_source = (Path(__file__).parents[1] / "src/MoonBase/Modules/FileMan
 sveltekit_source = (Path(__file__).parents[1] / "lib/framework/ESP32SvelteKit.cpp").read_text()
 system_status_header = (Path(__file__).parents[1] / "lib/framework/SystemStatus.h").read_text()
 system_status_source = (Path(__file__).parents[1] / "lib/framework/SystemStatus.cpp").read_text()
+lights_control_source = (Path(__file__).parents[1] / "src/MoonLight/Modules/ModuleLightsControl.h").read_text()
 allocator = "JsonDocument doc(PsychicJsonAllocator::instance());"
 no_clients = "if (!client && _handler.count() == 0) return;"
 event_guard = "if (!sync && !_socket->hasBroadcastRecipient(_event, originId)) return;"
@@ -54,11 +55,16 @@ assert "HTTPD_WS_TYPE_PING" not in websocket_source, "ESP-IDF must own WebSocket
 assert "TCP_NODELAY" not in server_source, "HTTP and WebSocket sockets must use the supported TCP defaults"
 assert "#ifdef WIFI_USE_STATIC_BUFFERS\n    WiFi.useStaticBuffers(true);\n#endif" in wifi_source
 assert wifi_source.index("WiFi.useStaticBuffers(true);") < wifi_source.index("WiFi.mode(WIFI_MODE_STA)")
-assert "-D WIFI_USE_STATIC_BUFFERS=1" in pico_config
-assert "-include lib/framework/WiFiStaticBuffers.h" in pico_config
+pico2_start = pico_config.index("[env:esp32-d0-pico2]")
+pico2_config = pico_config[pico2_start:]
+assert "WIFI_USE_STATIC_BUFFERS" not in pico2_config, "DigNext2 profile must not park WiFi buffers in internal RAM"
+assert "CONFIG_RECOVERY_ENABLED" not in pico2_config, "DigNext2 profile must not auto-rollback user saves on panic"
 assert "#define CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 8" in wifi_buffer_config
 assert "#define CONFIG_ESP_WIFI_TX_BUFFER_TYPE 0" in wifi_buffer_config
 assert "#undef CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER" in wifi_buffer_config
+assert "max_open_sockets = 6" in server_source, "HTTP server must reserve enough client slots for UI + WS"
+assert "kPresetDmaMinBytes = 8192" in lights_control_source, "Preset folder scan must wait for healthy DMA headroom"
+assert "refreshBuiltinPresetLabels" in lights_control_source, "Preset labels must refresh without wiping RAM cache"
 assert "bool hasBroadcastRecipient(const String &event, const String &originId);" in event_socket_header
 query_start = event_socket_source.index("bool EventSocket::hasBroadcastRecipient")
 query_end = event_socket_source.index("// 🌙 Client info", query_start)
@@ -85,5 +91,11 @@ assert "uint32_t _sketchSize = 0;" in system_status_header
 assert "esp_image_get_metadata(&position, &metadata)" in system_status_source
 assert "_sketchSize = metadata.image_len;" in system_status_source
 assert "ESP.getSketchSize()" not in system_status_source, "System status must not re-enter the hardware SHA engine"
+
+on_update = lights_control_source.index("void onUpdate")
+loop20ms = lights_control_source.index("void loop20ms() override")
+assert 'copyFile(presetFile.c_str(), "/.config/effects.json")' not in lights_control_source[on_update:loop20ms], "Preset copies must not run on the httpd update path"
+assert 'applyCachedPreset(' in lights_control_source[loop20ms:], 'Preset apply must stay in RAM on loop20ms'
+assert 'copyFile(' not in lights_control_source[loop20ms:], 'Preset apply must not copy files on the live path'
 status_handler = system_status_source.index("esp_err_t SystemStatus::systemStatus")
 assert "ESP.getSketchSize()" not in system_status_source[status_handler:], "Live status requests must not re-enter the hardware SHA engine"

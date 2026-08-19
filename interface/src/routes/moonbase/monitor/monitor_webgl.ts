@@ -6,6 +6,7 @@ import { mat4 } from 'gl-matrix';
 let uMVPLocation: WebGLUniformLocation | null = null;
 
 let gl: WebGLRenderingContext | null = null;
+let ctx2d: CanvasRenderingContext2D | null = null;
 let program: WebGLProgram;
 let positionBuffer: WebGLBuffer;
 
@@ -19,11 +20,19 @@ let matrixDepth: number = 1;
 
 let colorBuffer: WebGLBuffer; // Buffer for color data
 
+function paintFallback(el: HTMLCanvasElement) {
+	ctx2d = el.getContext('2d');
+	if (!ctx2d) return;
+	ctx2d.fillStyle = '#000';
+	ctx2d.fillRect(0, 0, el.width, el.height);
+}
+
 export function createScene(el: HTMLCanvasElement) {
 	// Initialize WebGL
 	const newGl = el.getContext('webgl');
 	if (!newGl) {
 		console.error('WebGL not supported');
+		paintFallback(el);
 		return;
 	}
 
@@ -144,8 +153,30 @@ export function setMatrixDimensions(width: number, height: number, depth: number
 	matrixDepth = depth;
 }
 
+function updateFallback() {
+	if (!ctx2d) return;
+	const canvas = ctx2d.canvas;
+	ctx2d.fillStyle = '#000';
+	ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+	const count = vertices.length / 3;
+	for (let i = 0; i < count; i++) {
+		const x = ((vertices[i * 3] + 1) * 0.5) * canvas.width;
+		const y = ((1 - vertices[i * 3 + 1]) * 0.5) * canvas.height;
+		const r = Math.round((colors[i * 4] ?? 1) * 255);
+		const g = Math.round((colors[i * 4 + 1] ?? 1) * 255);
+		const b = Math.round((colors[i * 4 + 2] ?? 1) * 255);
+		ctx2d.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+		ctx2d.beginPath();
+		ctx2d.arc(x, y, 4, 0, Math.PI * 2);
+		ctx2d.fill();
+	}
+}
+
 export const updateScene = () => {
-	if (!gl) return;
+	if (!gl) {
+		updateFallback();
+		return;
+	}
 
 	// Set the MVP matrix
 	const mvp = getMVPMatrix();

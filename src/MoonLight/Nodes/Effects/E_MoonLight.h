@@ -322,6 +322,204 @@ class LinesEffect : public Node {
   }
 };
 
+class WraparoundRacersEffect : public Node {
+ public:
+  static const char* name() { return "Wraparound Racers"; }
+  static uint8_t dim() { return _3D; }
+  static const char* tags() { return "🔥"; }
+  static const char* category() { return "MoonLight"; }
+
+  uint8_t bpm = 48;
+  uint8_t fade = 46;
+  uint8_t racers = 6;
+  uint8_t trail = 42;
+
+  void setup() override {
+    addControl(bpm, "bpm", "slider");
+    addControl(fade, "fade", "slider");
+    addControl(racers, "racers", "slider", 1, 12);
+    addControl(trail, "trail", "slider", 8, 80);
+  }
+
+  void loop() override {
+    layer->fadeToBlackBy(fade);
+    const uint8_t count = MAX(1, racers);
+    const uint32_t cycleMs = bpm ? (60000u / bpm) : 1;
+    const float t = (millis() % cycleMs) / (float)cycleMs;
+    const bool unwrap = layer->size.z <= 1 && layer->size.x > 1;
+    const float twoPi = 6.2831853f;
+    const float window = trail / 255.0f * (unwrap ? (layer->size.x * 0.28f + 1.2f) : 1.15f) + (unwrap ? 0.8f : 0.18f);
+    const float cx = (layer->size.x - 1) * 0.5f;
+    const float cy = (layer->size.y - 1) * 0.5f;
+    const uint16_t strideY = MAX(1, layer->size.x);
+    const uint16_t strideZ = MAX(1, layer->size.x * layer->size.y);
+
+    for (nrOfLights_t indexV = 0; indexV < layer->nrOfLights; indexV++) {
+      if (!layer->isMapped(indexV)) continue;
+      const uint16_t x = indexV % strideY;
+      const uint16_t y = (indexV / strideY) % MAX(1, layer->size.y);
+      const uint16_t z = indexV / strideZ;
+      for (uint8_t i = 0; i < count; i++) {
+        float d;
+        float heightDelta;
+        if (unwrap) {
+          const float yCenter = (i + 0.5f) * layer->size.y / count;
+          heightDelta = fabsf((float)y - yCenter);
+          if (heightDelta > 1.15f) continue;
+          const float dir = (i & 1) ? 1.0f : -1.0f;
+          float head = dir * t * layer->size.x + i * (layer->size.x / (float)count);
+          head = fmodf(head, (float)layer->size.x);
+          if (head < 0) head += layer->size.x;
+          d = fabsf((float)x - head);
+          const float wrap = (float)layer->size.x - d;
+          if (wrap < d) d = wrap;
+        } else {
+          const float heightCenter = (i + 0.5f) * layer->size.z / count;
+          heightDelta = fabsf((float)z - heightCenter);
+          if (heightDelta > 1.7f) continue;
+          const float dx = x - cx;
+          const float dy = y - cy;
+          if (dx * dx + dy * dy < 0.16f) continue;
+          float ang = atan2f(dy, dx);
+          if (ang < 0) ang += twoPi;
+          const float dir = (i & 1) ? 1.0f : -1.0f;
+          float head = dir * t * twoPi + i * twoPi / count;
+          head = fmodf(head, twoPi);
+          if (head < 0) head += twoPi;
+          d = fabsf(ang - head);
+          if (d > twoPi - d) d = twoPi - d;
+        }
+        if (d > window) continue;
+        const float hNorm = unwrap ? (1.0f - heightDelta / 1.15f) : (1.0f - heightDelta / 1.7f);
+        uint8_t bri = (uint8_t)((1.0f - d / window) * hNorm * 255.0f);
+        if (!bri) continue;
+        CRGB color = ColorFromPalette(layerP.palette, i * 37 + (unwrap ? y : z) * 11);
+        color.nscale8(bri);
+        layer->setRGB(indexV, color);
+      }
+    }
+  }
+};
+
+class CrossingSpiralEffect : public Node {
+ public:
+  static const char* name() { return "Crossing Spiral"; }
+  static uint8_t dim() { return _3D; }
+  static const char* tags() { return "🔥"; }
+  static const char* category() { return "MoonLight"; }
+
+  uint8_t bpm = 34;
+  uint8_t fade = 38;
+  uint8_t turns = 2;
+  uint8_t width = 30;
+
+  void setup() override {
+    addControl(bpm, "bpm", "slider");
+    addControl(fade, "fade", "slider");
+    addControl(turns, "turns", "slider", 1, 6);
+    addControl(width, "width", "slider", 8, 80);
+  }
+
+  void loop() override {
+    layer->fadeToBlackBy(fade);
+    const uint32_t cycleMs = bpm ? (60000u / bpm) : 1;
+    const float t = (millis() % cycleMs) / (float)cycleMs;
+    const bool unwrap = layer->size.z <= 1 && layer->size.x > 1;
+    const float twoPi = 6.2831853f;
+    const float climb = MAX(1, turns);
+    const float window = width / 255.0f * (unwrap ? (layer->size.x * 0.22f + 1.0f) : 1.05f) + (unwrap ? 0.7f : 0.16f);
+    const float cx = (layer->size.x - 1) * 0.5f;
+    const float cy = (layer->size.y - 1) * 0.5f;
+    const uint16_t strideY = MAX(1, layer->size.x);
+    const uint16_t strideZ = MAX(1, layer->size.x * layer->size.y);
+
+    for (nrOfLights_t indexV = 0; indexV < layer->nrOfLights; indexV++) {
+      if (!layer->isMapped(indexV)) continue;
+      const uint16_t x = indexV % strideY;
+      const uint16_t y = (indexV / strideY) % MAX(1, layer->size.y);
+      const uint16_t z = indexV / strideZ;
+      const float h = unwrap
+                          ? (layer->size.y > 1 ? (float)y / (layer->size.y - 1) : 0.0f)
+                          : (layer->size.z > 1 ? (float)z / (layer->size.z - 1) : 0.0f);
+      for (uint8_t i = 0; i < 2; i++) {
+        float d;
+        if (unwrap) {
+          const float dir = i ? -1.0f : 1.0f;
+          float head = dir * (t * layer->size.x + h * climb * layer->size.x) + i * (layer->size.x * 0.5f);
+          head = fmodf(head, (float)layer->size.x);
+          if (head < 0) head += layer->size.x;
+          d = fabsf((float)x - head);
+          const float wrap = (float)layer->size.x - d;
+          if (wrap < d) d = wrap;
+        } else {
+          const float dx = x - cx;
+          const float dy = y - cy;
+          if (dx * dx + dy * dy < 0.16f) continue;
+          float ang = atan2f(dy, dx);
+          if (ang < 0) ang += twoPi;
+          const float dir = i ? -1.0f : 1.0f;
+          float head = dir * (t * twoPi + h * climb * twoPi) + i * 3.1415926f;
+          head = fmodf(head, twoPi);
+          if (head < 0) head += twoPi;
+          d = fabsf(ang - head);
+          if (d > twoPi - d) d = twoPi - d;
+        }
+        if (d > window) continue;
+        uint8_t bri = (uint8_t)((1.0f - d / window) * 255.0f);
+        if (!bri) continue;
+        CRGB color = ColorFromPalette(layerP.palette, (uint8_t)(h * 180 + i * 90 + t * 40));
+        color.nscale8(bri);
+        layer->setRGB(indexV, color);
+      }
+    }
+  }
+};
+
+class HorizonRingEffect : public Node {
+ public:
+  static const char* name() { return "Horizon Ring"; }
+  static uint8_t dim() { return _3D; }
+  static const char* tags() { return "🔥"; }
+  static const char* category() { return "MoonLight"; }
+
+  uint8_t bpm = 22;
+  uint8_t fade = 70;
+  uint8_t thickness = 2;
+
+  void setup() override {
+    addControl(bpm, "bpm", "slider", 4, 80);
+    addControl(fade, "fade", "slider", 20, 180);
+    addControl(thickness, "thickness", "slider", 1, 4);
+  }
+
+  void loop() override {
+    layer->fadeToBlackBy(fade);
+    if (!layer->nrOfLights) return;
+    const uint32_t cycleMs = bpm ? (60000u / bpm) : 1;
+    const float t = (millis() % cycleMs) / (float)cycleMs;
+    const bool unwrap = layer->size.z <= 1 && layer->size.y > 1;
+    const float heightSpan = unwrap ? MAX(1, layer->size.y - 1) : MAX(1, layer->size.z - 1);
+    const float head = t * (heightSpan + thickness + 1.0f) - 0.5f;
+    const float band = MAX(1.0f, (float)thickness);
+    const uint16_t strideY = MAX(1, layer->size.x);
+    const uint16_t strideZ = MAX(1, layer->size.x * layer->size.y);
+
+    for (nrOfLights_t indexV = 0; indexV < layer->nrOfLights; indexV++) {
+      if (!layer->isMapped(indexV)) continue;
+      const uint16_t y = (indexV / strideY) % MAX(1, layer->size.y);
+      const uint16_t z = indexV / strideZ;
+      const float h = unwrap ? (float)y : (float)z;
+      const float d = fabsf(h - head);
+      if (d > band) continue;
+      uint8_t bri = (uint8_t)((1.0f - d / band) * 255.0f);
+      if (!bri) continue;
+      CRGB color = ColorFromPalette(layerP.palette, (uint8_t)(t * 90 + h * 8));
+      color.nscale8(bri);
+      layer->setRGB(indexV, color);
+    }
+  }
+};
+
 class RandomEffect : public Node {
  public:
   static const char* name() { return "Random"; }

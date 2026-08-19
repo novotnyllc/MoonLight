@@ -14,8 +14,6 @@
 
 #include <SystemStatus.h>
 
-#include <ConfigRecovery.h>
-
 #include <esp32-hal.h>
 #include <esp_image_format.h>
 #include <esp_ota_ops.h>
@@ -216,13 +214,6 @@ esp_err_t SystemStatus::systemStatus(PsychicRequest *request)
     root["core_temp"] = temperatureRead();
     root["cpu_reset_reason"] = verbosePrintResetReason(esp_reset_reason());
     root["uptime"] = millis() / 1000;
-#ifdef CONFIG_RECOVERY_ENABLED
-    root["config_recovery_available"] = ConfigRecovery::available();
-    root["config_recovery_pending"] = ConfigRecovery::pending();
-    root["config_recovery_confirm_in"] = ConfigRecovery::secondsUntilConfirmation();
-    root["config_recovery_last_action"] = ConfigRecovery::lastAction();
-    root["config_recovery_sound_healthy"] = ConfigRecovery::soundHealthy();
-#endif
     root["lps_all"]     = esp32sveltekit.lps_all_snapshot; // 🌙 read latched value, not live counter
     root["lps_effects"] = esp32sveltekit.lps_effects;  // 🌙
     root["lps_drivers"] = esp32sveltekit.lps_drivers;  // 🌙

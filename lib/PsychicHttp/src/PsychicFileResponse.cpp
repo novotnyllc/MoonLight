@@ -98,6 +98,11 @@ void PsychicFileResponse::_setContentType(const String& path){
   setContentType(_contentType);
 }
 
+static void* preferPsramBuffer(size_t size)
+{
+  return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
 esp_err_t PsychicFileResponse::send()
 {
   esp_err_t err = ESP_OK;
@@ -106,7 +111,7 @@ esp_err_t PsychicFileResponse::send()
   size_t size = getContentLength();
   if (size < FILE_INTERNAL_CHUNK_SIZE)
   {
-    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    uint8_t *buffer = static_cast<uint8_t *>(preferPsramBuffer(size));
     if (buffer == NULL)
     {
       /* Respond with 500 Internal Server Error */
@@ -124,11 +129,11 @@ esp_err_t PsychicFileResponse::send()
   {
     /* Retrieve the pointer to scratch buffer for temporary storage */
     size_t chunkSize = FILE_INTERNAL_CHUNK_SIZE;
-    char *chunk = static_cast<char *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    char *chunk = static_cast<char *>(preferPsramBuffer(chunkSize));
     if (chunk == NULL)
     {
       chunkSize = 256;
-      chunk = static_cast<char *>(heap_caps_malloc(chunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+      chunk = static_cast<char *>(preferPsramBuffer(chunkSize));
     }
     if (chunk == NULL)
     {
