@@ -90,6 +90,8 @@ StateUpdateResult updateMQTT(JsonObject& root, ModuleState& state, const String&
 
 class ModuleLightsControl : public Module {
  private:
+  static constexpr uint8_t kBuiltinVestPresetCount = 20;
+
   MqttEndpoint<ModuleState>* _mqttEndpoint = nullptr;  // pointer, dynamically allocated
   #if FT_ENABLED(FT_MQTT)
   PsychicMqttClient* _mqttClient;
@@ -168,8 +170,44 @@ class ModuleLightsControl : public Module {
   #endif
   }
 
+  void clampWearablePresetSettings() {
+    int firstPreset = _state.data["firstPreset"] | 1;
+    int lastPreset = _state.data["lastPreset"] | kBuiltinVestPresetCount;
+    if (firstPreset < 1) firstPreset = 1;
+    if (lastPreset > kBuiltinVestPresetCount) lastPreset = kBuiltinVestPresetCount;
+    if (firstPreset > lastPreset) firstPreset = 1;
+    bool changed = false;
+    if ((_state.data["firstPreset"] | 1) != firstPreset) {
+      _state.data["firstPreset"] = firstPreset;
+      changed = true;
+    }
+    if ((_state.data["lastPreset"] | kBuiltinVestPresetCount) != lastPreset) {
+      _state.data["lastPreset"] = lastPreset;
+      changed = true;
+    }
+    if ((_state.data["preset"]["count"] | kBuiltinVestPresetCount) != kBuiltinVestPresetCount) {
+      _state.data["preset"]["count"] = kBuiltinVestPresetCount;
+      changed = true;
+    }
+    JsonArray list = _state.data["preset"]["list"];
+    for (size_t i = list.size(); i-- > 0;) {
+      const int seq = list[i] | 0;
+      if (seq < 1 || seq > kBuiltinVestPresetCount) {
+        list.remove(i);
+        if (_state.data["preset"]["labels"].is<JsonArray>() && i < _state.data["preset"]["labels"].size()) {
+          _state.data["preset"]["labels"].remove(i);
+        }
+        changed = true;
+      }
+    }
+    if (changed) update([&](ModuleState&) { return StateUpdateResult::CHANGED; }, _moduleName);
+  }
+
   // Call after SharedFSPersistence::begin() so persisted lightscontrol.json does not wipe preset list.
-  void afterPersistenceLoaded() { setPresetsFromFolder(); }
+  void afterPersistenceLoaded() {
+    clampWearablePresetSettings();
+    setPresetsFromFolder();
+  }
 
   #if FT_ENABLED(FT_MQTT)
   void onMqttSettingsChanged() {
@@ -420,14 +458,14 @@ class ModuleLightsControl : public Module {
     control["default"].to<JsonObject>();  // clear the preset array before adding new presets
     control["default"]["list"].to<JsonArray>();
     control["default"]["labels"].to<JsonArray>();
-    control["default"]["count"] = 64;
+    control["default"]["count"] = kBuiltinVestPresetCount;
 
     control = addControl(controls, "presetLoop", "slider");
     control["default"] = 0;
-    control = addControl(controls, "firstPreset", "slider", 1, 64);
+    control = addControl(controls, "firstPreset", "slider", 1, kBuiltinVestPresetCount);
     control["default"] = 1;
-    control = addControl(controls, "lastPreset", "slider", 1, 64);
-    control["default"] = 20;
+    control = addControl(controls, "lastPreset", "slider", 1, kBuiltinVestPresetCount);
+    control["default"] = kBuiltinVestPresetCount;
 
   #if FT_ENABLED(FT_MONITOR)
     control = addControl(controls, "monitorOn", "checkbox");
@@ -663,15 +701,13 @@ class ModuleLightsControl : public Module {
     return false;
   }
 
-  static constexpr uint8_t kBuiltinVestPresetCount = 20;
-
   static const char* builtinVestPresetLabel(uint8_t seq) {
     static const char* kVestPresetLabels[kBuiltinVestPresetCount] = {
       "Horizon Ring", "Crossing Spiral", "Particle Sphere", "Star Wave",
-      "Wraparound Racers", "Ripple Stars", "Audio Paintbrush", "Audio GEQ",
-      "Bass Rings", "Freq Wave", "Meteor Rain", "Camp Fire",
-      "Noise Pulse", "Camp Pulse", "DJ Strobe", "Bass Puddles",
-      "White Out", "Twinkle Night", "Grav Meter", "Rainbow Walk"};
+      "Wraparound Racers", "Ripple Stars",
+      "Audio Paintbrush", "Audio GEQ", "Bass Rings", "Freq Wave",
+      "Noise Pulse", "Camp Pulse", "DJ Strobe", "Bass Puddles", "Grav Meter",
+      "Meteor Rain", "Camp Fire", "White Out", "Twinkle Night", "Rainbow Walk"};
     if (seq < 1 || seq > kBuiltinVestPresetCount) return "";
     return kVestPresetLabels[seq - 1];
   }
@@ -717,6 +753,21 @@ class ModuleLightsControl : public Module {
           changed = true;
         }
       }
+      for (size_t i = 0; i + 1 < list.size(); i++) {
+        for (size_t j = i + 1; j < list.size(); j++) {
+          if ((list[j] | 0) < (list[i] | 0)) {
+            const int tmpSeq = list[i] | 0;
+            list[i] = list[j];
+            list[j] = tmpSeq;
+            if (i < labels.size() && j < labels.size()) {
+              const char* tmpLabel = labels[i];
+              labels[i] = labels[j];
+              labels[j] = tmpLabel;
+            }
+            changed = true;
+          }
+        }
+      }
     }
     if (changed) {
       update([&](ModuleState& state) { return StateUpdateResult::CHANGED; }, _moduleName);
@@ -743,6 +794,7 @@ class ModuleLightsControl : public Module {
     walkThroughFiles(rootFolder, [&](File folder, File file) {
       int seq = -1;
       if (sscanf(file.name(), "preset%02d.json", &seq) != 1) return;
+      if (seq < 1 || seq > kBuiltinVestPresetCount) return;
       _state.data["preset"]["list"].add(seq);
       char label[32] = "";
       file.seek(0);
@@ -770,7 +822,7 @@ class ModuleLightsControl : public Module {
     JsonArray presetList = _state.data["preset"]["list"];
     int selected = _state.data["preset"]["selected"] | 255;
     int firstPreset = _state.data["firstPreset"] | 1;
-    int lastPreset = _state.data["lastPreset"] | 64;
+    int lastPreset = _state.data["lastPreset"] | kBuiltinVestPresetCount;
     return chooseDigNext2Preset(
         presetList.size(), [&](size_t index) { return presetList[index].as<int>(); }, selected, firstPreset, lastPreset, backwards);
   }
@@ -846,15 +898,15 @@ class ModuleLightsControl : public Module {
     case 8: name = "GEQ 3D"; fx["label"] = "Audio GEQ"; break;
     case 9: name = "Audio Rings"; fx["label"] = "Bass Rings"; node["controls"][0]["name"] = "inWards"; node["controls"][0]["value"] = true; break;
     case 10: name = "Freq Wave"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 140; break;
-    case 11: name = "Meteor"; fx["label"] = "Meteor Rain"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "trail"; node["controls"][1]["value"] = 160; break;
-    case 12: name = "Fire"; fx["layer"] = 1; fx["label"] = "Camp Fire"; node["controls"][0]["name"] = "usePalette"; node["controls"][0]["value"] = true; node["controls"][1]["name"] = "flareDecay"; node["controls"][1]["value"] = 14; break;
-    case 13: name = "Noise Meter"; fx["label"] = "Noise Pulse"; node["controls"][0]["name"] = "fadeRate"; node["controls"][0]["value"] = 248; node["controls"][1]["name"] = "width"; node["controls"][1]["value"] = 180; break;
-    case 14: name = "Heartbeat"; fx["label"] = "Camp Pulse"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 18; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
-    case 15: name = "DJ Light"; fx["label"] = "DJ Strobe"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 220; node["controls"][1]["name"] = "candyFactory"; node["controls"][1]["value"] = true; node["controls"][2]["name"] = "fade"; node["controls"][2]["value"] = 4; break;
-    case 16: name = "Puddle Peak"; fx["label"] = "Bass Puddles"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 180; break;
-    case 17: name = "Solid"; fx["label"] = "White Out"; node["controls"][0]["name"] = "colorMode"; node["controls"][0]["value"] = 0; node["controls"][1]["name"] = "red"; node["controls"][1]["value"] = 255; node["controls"][2]["name"] = "green"; node["controls"][2]["value"] = 200; node["controls"][3]["name"] = "blue"; node["controls"][3]["value"] = 180; node["controls"][4]["name"] = "brightness"; node["controls"][4]["value"] = 220; break;
-    case 18: name = "Color Twinkle"; fx["label"] = "Twinkle Night"; node["controls"][0]["name"] = "fadeSpeed"; node["controls"][0]["value"] = 140; node["controls"][1]["name"] = "spawnSpeed"; node["controls"][1]["value"] = 120; break;
-    case 19: name = "Gravimeter"; fx["label"] = "Grav Meter"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
+    case 11: name = "Noise Meter"; fx["label"] = "Noise Pulse"; node["controls"][0]["name"] = "fadeRate"; node["controls"][0]["value"] = 248; node["controls"][1]["name"] = "width"; node["controls"][1]["value"] = 180; break;
+    case 12: name = "Heartbeat"; fx["label"] = "Camp Pulse"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 18; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
+    case 13: name = "DJ Light"; fx["label"] = "DJ Strobe"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 220; node["controls"][1]["name"] = "candyFactory"; node["controls"][1]["value"] = true; node["controls"][2]["name"] = "fade"; node["controls"][2]["value"] = 4; break;
+    case 14: name = "Puddle Peak"; fx["label"] = "Bass Puddles"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 180; break;
+    case 15: name = "Gravimeter"; fx["label"] = "Grav Meter"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
+    case 16: name = "Meteor"; fx["label"] = "Meteor Rain"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "trail"; node["controls"][1]["value"] = 160; break;
+    case 17: name = "Fire"; fx["layer"] = 1; fx["label"] = "Camp Fire"; node["controls"][0]["name"] = "usePalette"; node["controls"][0]["value"] = true; node["controls"][1]["name"] = "flareDecay"; node["controls"][1]["value"] = 14; break;
+    case 18: name = "Solid"; fx["label"] = "White Out"; node["controls"][0]["name"] = "colorMode"; node["controls"][0]["value"] = 0; node["controls"][1]["name"] = "red"; node["controls"][1]["value"] = 255; node["controls"][2]["name"] = "green"; node["controls"][2]["value"] = 200; node["controls"][3]["name"] = "blue"; node["controls"][3]["value"] = 180; node["controls"][4]["name"] = "brightness"; node["controls"][4]["value"] = 220; break;
+    case 19: name = "Color Twinkle"; fx["label"] = "Twinkle Night"; node["controls"][0]["name"] = "fadeSpeed"; node["controls"][0]["value"] = 140; node["controls"][1]["name"] = "spawnSpeed"; node["controls"][1]["value"] = 120; break;
     case 20: name = "Rainbow"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 10; node["controls"][1]["name"] = "deltaHue"; node["controls"][1]["value"] = 7; node["controls"][2]["name"] = "usePalette"; node["controls"][2]["value"] = true; break;
     default: return false;
     }
