@@ -78,7 +78,6 @@ void operator delete[](void* ptr, size_t size) noexcept {
 #endif
 
 #include <ESP32SvelteKit.h>
-#include <ConfigRecovery.h>
 #include <PsychicHttpServer.h>
 
 #define SERIAL_BAUD_RATE 115200
@@ -339,9 +338,6 @@ void setup() {
     if (digitalRead(FACTORY_SAFE_MODE_BUTTON) != LOW) {
       ESP_LOGW(ML_TAG, "Ignored short recovery-button press");
     } else {
-#ifdef CONFIG_RECOVERY_ENABLED
-      ConfigRecovery::requestRestore();
-#endif
       safeModeMB = true;
       ESP_LOGW(ML_TAG, "Recovery Button_1 held for 3 seconds; requesting confirmed configuration or safe mode");
     }
@@ -366,7 +362,7 @@ void setup() {
 
   // start ESP32-SvelteKit
   if (!esp32sveltekit.begin()) {
-    ESP_LOGE(ML_TAG, "Startup stopped after failed configuration recovery");
+    ESP_LOGE(ML_TAG, "Startup stopped during ESP32-SvelteKit initialization");
     return;
   }
 

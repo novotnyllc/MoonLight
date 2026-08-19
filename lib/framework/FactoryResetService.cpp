@@ -14,8 +14,6 @@
 
 #include <FactoryResetService.h>
 
-#include <ConfigRecovery.h>
-
 using namespace std::placeholders;
 
 FactoryResetService::FactoryResetService(PsychicHttpServer *server,
@@ -48,9 +46,6 @@ esp_err_t FactoryResetService::handleRequest(PsychicRequest *request)
  */
 void FactoryResetService::factoryReset()
 {
-#ifdef CONFIG_RECOVERY_ENABLED
-    ConfigRecovery::clear();
-#endif
     File root = fs->open(FS_CONFIG_DIRECTORY);
     File file;
     while (file = root.openNextFile())

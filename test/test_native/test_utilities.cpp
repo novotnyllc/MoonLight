@@ -271,42 +271,6 @@ TEST_CASE("protected recovery paths") {
   CHECK_FALSE(isProtectedRecoveryPath(nullptr));
 }
 
-TEST_CASE("recovery promotion requires current connectivity") {
-  CHECK_FALSE(recoveryConnectivityHealthy(false, true, false));
-  CHECK(recoveryConnectivityHealthy(false, true, true));
-  CHECK(recoveryConnectivityHealthy(true, false, false));
-  CHECK_FALSE(recoveryConnectivityHealthy(false, false, false));
-}
-
-TEST_CASE("recovery sound health expires without fresh samples") {
-  CHECK(recoverySoundSampleFresh(true, true, 5999, 1000));
-  CHECK_FALSE(recoverySoundSampleFresh(true, true, 6000, 1000));
-  CHECK_FALSE(recoverySoundSampleFresh(true, false, 1000, 1000));
-  CHECK(recoverySoundSampleFresh(false, false, 6000, 1000));
-  CHECK(recoverySoundSampleFresh(true, true, 2, UINT32_MAX - 1000));
-
-  RecoverySoundState sharedState;
-  sharedState.report(true, 1000);
-  CHECK(sharedState.fresh(true, 5999));
-  sharedState.report(false, 6000);
-  CHECK_FALSE(sharedState.fresh(true, 6000));
-}
-
-TEST_CASE("recovery restores invalid live state only on failure resets") {
-  CHECK(recoveryShouldRestore(true, true, false, false));
-  CHECK_FALSE(recoveryShouldRestore(true, true, true, false));
-  CHECK_FALSE(recoveryShouldRestore(true, true, true, true));
-  CHECK_FALSE(recoveryShouldRestore(true, false, false, false));
-  CHECK_FALSE(recoveryShouldRestore(false, true, false, false));
-}
-
-TEST_CASE("recovery slots require a manifest and both readable roots") {
-  CHECK(recoverySlotReady(true, true, true));
-  CHECK_FALSE(recoverySlotReady(false, true, true));
-  CHECK_FALSE(recoverySlotReady(true, false, true));
-  CHECK_FALSE(recoverySlotReady(true, true, false));
-}
-
 TEST_CASE("PDM keeps requested affinity persistent while forcing effective RMT") {
   uint8_t requestedAffinity = 3;
   CHECK_EQ(recoveryEffectiveAffinity(requestedAffinity, true), 1);
@@ -321,14 +285,6 @@ TEST_CASE("configured FastLED output retries only when channels are missing") {
   CHECK_FALSE(recoveryShouldRetryFastLedInitialization(1, 95, 1));
   CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 0, 1));
   CHECK_FALSE(recoveryShouldRetryFastLedInitialization(0, 95, 0));
-}
-
-TEST_CASE("legacy recovery upgrade never adopts live state after a failure") {
-  CHECK(recoveryMayUpgradeLegacySlot(false, true, true, true));
-  CHECK_FALSE(recoveryMayUpgradeLegacySlot(true, true, true, true));
-  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, false, true, true));
-  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, true, false, true));
-  CHECK_FALSE(recoveryMayUpgradeLegacySlot(false, true, true, false));
 }
 
 TEST_CASE("coalesced snapshots exclude an origin only when every update shares it") {

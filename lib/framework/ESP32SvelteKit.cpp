@@ -13,9 +13,7 @@
  **/
 
 #include <ESP32SvelteKit.h>
-#include <ConfigRecovery.h>
 #include <MdnsRegistrationPolicy.h>
-#include <RecoveryPolicy.h>
 #include <esp_heap_caps.h>
 
 //🌙 added to telemetry
@@ -79,14 +77,6 @@ bool ESP32SvelteKit::begin()
 {
     ESP_LOGV(SVK_TAG, "Loading settings from files system");
     ESPFS.begin(true);
-#ifdef CONFIG_RECOVERY_ENABLED
-    if (!ConfigRecovery::begin(&ESPFS, esp_reset_reason())) {
-        safeModeMB = true;
-        ESP_LOGE(SVK_TAG, "Configuration recovery failed; settings initialization blocked");
-        return false;
-    }
-    if (ConfigRecovery::restoredThisBoot()) safeModeMB = false;
-#endif
 
 #if FT_ENABLED(FT_WIFI) // 🌙
     // 🌙 Load WiFi state early so getSystemHostname() returns the configured hostname
@@ -423,10 +413,6 @@ void ESP32SvelteKit::_loop()
         {
             function();
         }
-
-#ifdef CONFIG_RECOVERY_ENABLED
-        ConfigRecovery::loop(!safeModeMB && recoveryConnectivityHealthy(wifi_eth_combined, ap, event) && lps_all_snapshot > 0);
-#endif
 
         static int lastTime = 0;
         if (millis() - lastTime > 1000)

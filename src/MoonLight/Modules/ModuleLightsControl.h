@@ -350,6 +350,8 @@ class ModuleLightsControl : public Module {
 
     control = addControl(controls, "lightsOn", "checkbox");
     control["default"] = true;
+    control = addControl(controls, "bootLightsOn", "checkbox");
+    control["default"] = true;
     control = addControl(controls, "brightness", "slider");
     control["default"] = 20;
     control = addControl(controls, "red", "slider");
@@ -725,13 +727,14 @@ class ModuleLightsControl : public Module {
   }
 
   void forceWearablePowerOn() {
-    // Recovery can restore lightsOff and empty effect layers. Empty layers skip virtual mapping,
-    // so the compiled White Vest 95 layout stays unused and the monitor stays blank.
-    JsonDocument powerDoc;
-    JsonObject power = powerDoc.to<JsonObject>();
-    power["lightsOn"] = true;
-    if ((uint8_t)_state.data["brightness"] < 20) power["brightness"] = 96;
-    update(power, ModuleState::update, String("1"));  // numeric origin persists lightsOn
+    // Empty effect layers skip virtual mapping, so the compiled White Vest 95 layout stays unused.
+    if (_state.data["bootLightsOn"] | true) {
+      JsonDocument powerDoc;
+      JsonObject power = powerDoc.to<JsonObject>();
+      power["lightsOn"] = true;
+      if ((uint8_t)_state.data["brightness"] < 20) power["brightness"] = 96;
+      update(power, ModuleState::update, String("1"));  // numeric origin persists lightsOn
+    }
 
     bool hasEffect = false;
     for (VirtualLayer* layer : layerP.layers) {

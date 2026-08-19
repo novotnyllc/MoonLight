@@ -17,7 +17,6 @@
   #include "fl/audio/audio_processor.h"
   #include "fl/audio/detector/equalizer.h"
   #include "fl/audio/input.h"
-  #include <ConfigRecovery.h>
   #include <driver/i2s_pdm.h>
   #include <esp_task_wdt.h>
 // #include "fl/time_alpha.h"
@@ -156,9 +155,6 @@ class FastLEDAudioDriver : public Node {
   }
 
   void onUpdate(const JsonObject& control) override {
-#ifdef CONFIG_RECOVERY_ENABLED
-    if (!on) ConfigRecovery::reportSoundHealthy(false);
-#endif
     if (!control["on"].isNull()) {
       if (!on) {
         stopService();
@@ -195,10 +191,6 @@ class FastLEDAudioDriver : public Node {
     bool changed = moduleIO->updatePin(pinI2SWS, pin_I2S_WS);
     changed = moduleIO->updatePin(pinI2SSD, pin_I2S_SD) || changed;
     changed = moduleIO->updatePin(pinI2SSCK, pin_I2S_SCK) || changed;
-
-#ifdef CONFIG_RECOVERY_ENABLED
-    ConfigRecovery::requireSound(pinI2SSCK == UINT8_MAX && pinI2SWS != UINT8_MAX && pinI2SSD != UINT8_MAX);
-#endif
 
     if (changed) {
       stopService();
@@ -251,9 +243,6 @@ class FastLEDAudioDriver : public Node {
         pdmSamples += count;
         samplesCaptured += count;
         lastPdmSample = millis();
-#ifdef CONFIG_RECOVERY_ENABLED
-        ConfigRecovery::reportSoundHealthy(true);
-#endif
         audioProcessor.update(fl::audio::Sample(fl::span<const fl::i16>(samples, count), timestamp));
         esp_task_wdt_reset();
       }
@@ -266,9 +255,6 @@ class FastLEDAudioDriver : public Node {
     } else if (drainBuffer) {
       while (fl::audio::Sample sample = audioInput->read()) {
         samplesCaptured += sample.size();
-#ifdef CONFIG_RECOVERY_ENABLED
-        ConfigRecovery::reportSoundHealthy(true);
-#endif
         audioProcessor.update(sample);
       }
 
@@ -276,9 +262,6 @@ class FastLEDAudioDriver : public Node {
       fl::audio::Sample sample = audioInput->read();
       if (sample.isValid()) {
         samplesCaptured += sample.size();
-#ifdef CONFIG_RECOVERY_ENABLED
-        ConfigRecovery::reportSoundHealthy(true);
-#endif
         audioProcessor.update(sample);
       }
     }
@@ -349,9 +332,6 @@ class FastLEDAudioDriver : public Node {
   }
 
   void stopService() {
-#ifdef CONFIG_RECOVERY_ENABLED
-    ConfigRecovery::reportSoundHealthy(false);
-#endif
     if (boundedPdmActive) {
       i2s_channel_disable(pdmRxHandle);
       i2s_del_channel(pdmRxHandle);
@@ -386,9 +366,6 @@ class FastLEDAudioDriver : public Node {
   }
 
   bool startBoundedPdm() {
-#ifdef CONFIG_RECOVERY_ENABLED
-    ConfigRecovery::reportSoundHealthy(false);
-#endif
     i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     channel.dma_desc_num = 6;
     channel.dma_frame_num = 256;
