@@ -703,11 +703,29 @@ class ModuleLightsControl : public Module {
 
   static const char* builtinVestPresetLabel(uint8_t seq) {
     static const char* kVestPresetLabels[kBuiltinVestPresetCount] = {
-      "Horizon Ring", "Crossing Spiral", "Particle Sphere", "Star Wave",
-      "Wraparound Racers", "Ripple Stars",
-      "Audio Paintbrush", "Audio GEQ", "Bass Rings", "Freq Wave",
-      "Noise Pulse", "Camp Pulse", "DJ Strobe", "Bass Puddles", "Grav Meter",
-      "Meteor Rain", "Camp Fire", "White Out", "Twinkle Night", "Rainbow Walk"};
+      // Motion (1-6)
+      "💫 Horizon Ring",
+      "🌀 Crossing Spiral",
+      "✨ Particle Sphere",
+      "⭐ Star Wave",
+      "💨 Wraparound Racers",
+      "🌊 Ripple Stars",
+      // Audio reactive (7-15)
+      "🎵 Audio Paintbrush",
+      "🎵 Audio GEQ",
+      "🎵 Bass Rings",
+      "🎵 Freq Wave",
+      "🎵 Noise Pulse",
+      "🎵 Camp Pulse",
+      "🎵 DJ Strobe",
+      "🎵 Bass Puddles",
+      "🎵 Grav Meter",
+      // Ambient / solid (16-20)
+      "☄️ Meteor Rain",
+      "🔥 Camp Fire",
+      "💡 White Out",
+      "✨ Twinkle Night",
+      "🌈 Rainbow Walk"};
     if (seq < 1 || seq > kBuiltinVestPresetCount) return "";
     return kVestPresetLabels[seq - 1];
   }
