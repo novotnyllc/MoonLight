@@ -21,6 +21,10 @@ bool safeModeMB = false; // 🌙 see .h
 bool restartNeeded = false; // 🌙 see .h
 bool saveNeeded = false; // 🌙 see.h
 
+#if FT_MOONBASE == 1
+bool moonbaseGoldenConfigPresent();
+#endif
+
 ESP32SvelteKit::ESP32SvelteKit(PsychicHttpServer *server, unsigned int numberEndpoints) : _server(server),
                                                                                           _numberEndpoints(numberEndpoints),
                                                                                           _featureService(server, &_socket),
@@ -428,6 +432,9 @@ void ESP32SvelteKit::_loop()
                 doc["restartNeeded"] = restartNeeded;
                 doc["saveNeeded"] = saveNeeded;
                 doc["hostName"] = getSystemHostname();
+#if FT_MOONBASE == 1
+                doc["goldenPresent"] = moonbaseGoldenConfigPresent();
+#endif
                 JsonObject jsonObject = doc.as<JsonObject>();
                 _socket.emitEvent("status", jsonObject);
             }

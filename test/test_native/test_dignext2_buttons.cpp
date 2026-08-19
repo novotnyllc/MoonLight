@@ -8,57 +8,64 @@
 
 #include "MoonLight/Modules/DigNext2ButtonPolicy.h"
 
-TEST_CASE("Dig-Next-2 button hold policy") {
-  DigNext2ButtonState button1;
-  CHECK(updateDigNext2Button(button1, false, 0, true, false) == DigNext2ButtonAction::None);
-  CHECK(updateDigNext2Button(button1, true, 100, true, false) == DigNext2ButtonAction::None);
-  CHECK(updateDigNext2Button(button1, false, 600, true, false) == DigNext2ButtonAction::NextPreset);
+TEST_CASE("Dig-Next-2 short preset taps while lights on") {
+  DigNext2ButtonRuntime rt;
+  DigNext2ButtonInputs in;
+  in.lightsOn = true;
 
-  DigNext2ButtonState button1Medium;
-  updateDigNext2Button(button1Medium, false, 0, true, false);
-  updateDigNext2Button(button1Medium, true, 100, true, false);
-  CHECK(updateDigNext2Button(button1Medium, false, 601, true, false) == DigNext2ButtonAction::None);
+  in.nowMs = 0;
+  in.button1 = true;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  in.nowMs = 300;
+  in.button1 = false;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::NextPreset);
 
-  DigNext2ButtonState button1Long;
-  updateDigNext2Button(button1Long, false, 0, true, false);
-  updateDigNext2Button(button1Long, true, 100, true, false);
-  CHECK(updateDigNext2Button(button1Long, true, 3100, true, false) == DigNext2ButtonAction::None);
-  CHECK(updateDigNext2Button(button1Long, false, 3101, true, false) == DigNext2ButtonAction::None);
-
-  DigNext2ButtonState button2;
-  updateDigNext2Button(button2, false, 0, false, false);
-  updateDigNext2Button(button2, true, 100, false, false);
-  CHECK(updateDigNext2Button(button2, false, 600, false, false) == DigNext2ButtonAction::PreviousPreset);
-
-  DigNext2ButtonState button2Medium;
-  updateDigNext2Button(button2Medium, false, 0, false, false);
-  updateDigNext2Button(button2Medium, true, 100, false, false);
-  CHECK(updateDigNext2Button(button2Medium, false, 7999, false, false) == DigNext2ButtonAction::None);
-
-  DigNext2ButtonState button2Long;
-  updateDigNext2Button(button2Long, false, 0, false, false);
-  updateDigNext2Button(button2Long, true, 100, false, false);
-  CHECK(updateDigNext2Button(button2Long, true, 8099, false, false) == DigNext2ButtonAction::None);
-  CHECK(updateDigNext2Button(button2Long, true, 8100, false, false) == DigNext2ButtonAction::ToggleSoftBlackout);
-  CHECK(updateDigNext2Button(button2Long, true, 9000, false, true) == DigNext2ButtonAction::None);
-  CHECK(updateDigNext2Button(button2Long, false, 9001, false, true) == DigNext2ButtonAction::None);
-
-  DigNext2ButtonState button2ReleaseAtThreshold;
-  updateDigNext2Button(button2ReleaseAtThreshold, false, 0, false, false);
-  updateDigNext2Button(button2ReleaseAtThreshold, true, 100, false, false);
-  CHECK(updateDigNext2Button(button2ReleaseAtThreshold, false, 8100, false, false) == DigNext2ButtonAction::ToggleSoftBlackout);
+  DigNext2ButtonRuntime rt2;
+  in = {};
+  in.lightsOn = true;
+  in.button2 = true;
+  CHECK(updateDigNext2ButtonsPolicy(rt2, in) == DigNext2ButtonAction::None);
+  in.nowMs = 300;
+  in.button2 = false;
+  CHECK(updateDigNext2ButtonsPolicy(rt2, in) == DigNext2ButtonAction::PreviousPreset);
 }
 
-TEST_CASE("Dig-Next-2 blackout wake consumes short releases") {
-  DigNext2ButtonState button1;
-  updateDigNext2Button(button1, false, 0, true, true);
-  updateDigNext2Button(button1, true, 100, true, true);
-  CHECK(updateDigNext2Button(button1, false, 500, true, true) == DigNext2ButtonAction::WakeSoftBlackout);
+TEST_CASE("Dig-Next-2 short taps ignored while lights off") {
+  DigNext2ButtonRuntime rt;
+  DigNext2ButtonInputs in;
+  in.lightsOn = false;
+  in.button1 = true;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  in.nowMs = 300;
+  in.button1 = false;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+}
 
-  DigNext2ButtonState button2;
-  updateDigNext2Button(button2, false, 0, false, true);
-  updateDigNext2Button(button2, true, 100, false, true);
-  CHECK(updateDigNext2Button(button2, false, 500, false, true) == DigNext2ButtonAction::WakeSoftBlackout);
+TEST_CASE("Dig-Next-2 both-hold toggles power") {
+  DigNext2ButtonRuntime rt;
+  DigNext2ButtonInputs in;
+  in.lightsOn = true;
+  in.button1 = true;
+  in.button2 = true;
+  in.nowMs = 0;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  in.nowMs = DIG_NEXT2_BOTH_POWER_MS;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::TogglePower);
+  in.nowMs = DIG_NEXT2_BOTH_POWER_MS + 100;
+  in.button1 = false;
+  in.button2 = false;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+}
+
+TEST_CASE("Dig-Next-2 long single hold ramps brightness") {
+  DigNext2ButtonRuntime rt;
+  DigNext2ButtonInputs in;
+  in.lightsOn = true;
+  in.button1 = true;
+  in.nowMs = 0;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  in.nowMs = DIG_NEXT2_RAMP_START_MS + DIG_NEXT2_RAMP_INTERVAL_MS;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::BrightnessStepUp);
 }
 
 TEST_CASE("Dig-Next-2 preset order ignores input order and missing slots") {

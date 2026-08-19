@@ -21,6 +21,7 @@
 #include "MoonBase/utilities/Coord3D.h"
 #include "MoonBase/utilities/PureFunctions.h"
 #include "RecoveryPolicy.h"
+#include "MoonBase/GoldenConfig.h"
 
 // ============================================================
 // Tests
@@ -256,6 +257,17 @@ TEST_CASE("contains") {
   CHECK_FALSE(contains("hello", "world"));
   CHECK_FALSE(contains(nullptr, "test"));
   CHECK_FALSE(contains("test", nullptr));
+}
+
+TEST_CASE("protected golden paths") {
+  CHECK(isProtectedGoldenPath("/.config-golden"));
+  CHECK(isProtectedGoldenPath("/.config-golden/effects.json"));
+  CHECK(isProtectedGoldenPath(".config-golden/presets/preset01.json"));
+  CHECK(isProtectedGoldenPath("/foo/../.config-golden/active"));
+  CHECK_FALSE(isProtectedGoldenPath("/.config"));
+  CHECK_FALSE(isProtectedGoldenPath("/.config-golden-backup"));
+  CHECK_FALSE(isProtectedGoldenPath("/foo/.config-goldenish"));
+  CHECK_FALSE(isProtectedGoldenPath(nullptr));
 }
 
 TEST_CASE("protected recovery paths") {

@@ -82,6 +82,8 @@ void operator delete[](void* ptr, size_t size) noexcept {
 
 #define SERIAL_BAUD_RATE 115200
 
+static bool bootGoldenRestoreRequested = false;
+
 PsychicHttpServer server;
 
 ESP32SvelteKit esp32sveltekit(&server, NROF_END_POINTS);  // 🌙 pio variable
@@ -91,6 +93,7 @@ ESP32SvelteKit esp32sveltekit(&server, NROF_END_POINTS);  // 🌙 pio variable
   #include "MoonBase/Modules/FileManager.h"
   #include "MoonBase/Modules/ModuleIO.h"
   #include "MoonBase/Modules/ModuleTasks.h"
+  #include "MoonBase/GoldenConfig.h"
 
 FileManager fileManager = FileManager(&server, &esp32sveltekit);
 ModuleTasks moduleTasks = ModuleTasks(&server, &esp32sveltekit);
@@ -334,12 +337,27 @@ void setup() {
   delay(25);
   if (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW) {
     uint32_t pressedAt = millis();
-    while (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW && millis() - pressedAt < 3000) delay(25);
+    while (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW && millis() - pressedAt < 5000) delay(25);
     if (digitalRead(FACTORY_SAFE_MODE_BUTTON) != LOW) {
       ESP_LOGW(ML_TAG, "Ignored short recovery-button press");
     } else {
       safeModeMB = true;
-      ESP_LOGW(ML_TAG, "Recovery Button_1 held for 3 seconds; requesting confirmed configuration or safe mode");
+      ESP_LOGW(ML_TAG, "Recovery Button_1 held for 5 seconds; requesting safe mode boot");
+    }
+  }
+#endif
+
+#ifdef FACTORY_GOLDEN_RESTORE_BUTTON
+  pinMode(FACTORY_GOLDEN_RESTORE_BUTTON, INPUT);
+  delay(25);
+  if (digitalRead(FACTORY_GOLDEN_RESTORE_BUTTON) == LOW) {
+    uint32_t pressedAt = millis();
+    while (digitalRead(FACTORY_GOLDEN_RESTORE_BUTTON) == LOW && millis() - pressedAt < 5000) delay(25);
+    if (digitalRead(FACTORY_GOLDEN_RESTORE_BUTTON) == LOW) {
+      bootGoldenRestoreRequested = true;
+      ESP_LOGW(ML_TAG, "Button_2 held for 5 seconds at power-on; golden restore requested");
+    } else {
+      ESP_LOGW(ML_TAG, "Ignored short golden-restore button press");
     }
   }
 #endif
@@ -404,6 +422,14 @@ void setup() {
 // MoonBase
 #if FT_ENABLED(FT_MOONBASE)
   fileManager.begin();
+  if (bootGoldenRestoreRequested) {
+    if (goldenRestoreSnapshot()) {
+      ESP_LOGW(ML_TAG, "Restored golden configuration from %s", GOLDEN_CONFIG_LOGICAL);
+    } else {
+      ESP_LOGE(ML_TAG, "Golden restore requested at boot but snapshot restore failed");
+    }
+    bootGoldenRestoreRequested = false;
+  }
   for (Module* module : modules) {
     module->begin();
   }
@@ -565,3 +591,9 @@ void loop() {
   #endif
 #endif
 }
+
+#if FT_MOONBASE == 1
+bool moonbaseGoldenConfigPresent() {
+  return goldenConfigPresent();
+}
+#endif

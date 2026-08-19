@@ -68,6 +68,26 @@
 		});
 	}
 
+	async function postSaveGolden() {
+		const response = await fetch('/rest/saveGolden', {
+			method: 'POST',
+			headers: {
+				Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic'
+			}
+		});
+		return response.ok;
+	}
+
+	async function postRestoreGolden() {
+		const response = await fetch('/rest/restoreGolden', {
+			method: 'POST',
+			headers: {
+				Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic'
+			}
+		});
+		return response.ok;
+	}
+
 	// 🌙 generic function!
 	function confirmDialog(action: String, fun: any) {
 		modals.open(ConfirmDialog, {
@@ -125,6 +145,28 @@
 			</button>
 		</div>
 	{/if}
+	<div class="flex-none">
+		<button
+			class="btn btn-square btn-ghost h-9 w-10"
+			title="Save golden configuration snapshot"
+			onclick={() => {
+				confirmDialog('Save golden configuration', postSaveGolden);
+			}}
+		>
+			⭐
+		</button>
+		{#if $telemetry.status.goldenPresent}
+			<button
+				class="btn btn-square btn-ghost h-9 w-10"
+				title="Restore golden configuration (reboots)"
+				onclick={() => {
+					confirmDialog('Restore golden configuration', postRestoreGolden);
+				}}
+			>
+				↩️
+			</button>
+		{/if}
+	</div>
 	
 	<!-- Theme Selector -->
 	<ThemeSelector />

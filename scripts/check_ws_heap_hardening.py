@@ -102,3 +102,11 @@ assert 'copyFile(' not in lights_control_source[loop20ms:], 'Preset apply must n
 assert 'lastDriversSnapshot' in (Path(__file__).parents[1] / "src/MoonLight/Nodes/Drivers/D_FastLEDAudio.h").read_text(), "Audio driver meters must use throttled snapshots"
 status_handler = system_status_source.index("esp_err_t SystemStatus::systemStatus")
 assert "ESP.getSketchSize()" not in system_status_source[status_handler:], "Live status requests must not re-enter the hardware SHA engine"
+assert "/rest/saveGolden" in file_manager_source, "Golden snapshot must be exposed over REST"
+assert "/rest/restoreGolden" in file_manager_source, "Golden restore must be exposed over REST"
+assert "goldenSaveSnapshot()" in file_manager_source, "Golden save must use fd tree copy"
+assert "goldenRestoreSnapshot()" in file_manager_source, "Golden restore must use fd tree copy"
+assert "isProtectedGoldenPath" in file_manager_source, "Golden tree must be hidden from file manager"
+assert "pollDigNext2Buttons" in lights_control_source, "Dig-Next-2 buttons must be polled from loop20ms"
+assert "toggleDigNext2Power" in lights_control_source, "Dig-Next-2 both-hold must toggle relay via lightsOn"
+assert "DIG_NEXT2_BOTH_POWER_MS" in (Path(__file__).parents[1] / "src/MoonLight/Modules/DigNext2ButtonPolicy.h").read_text(), "Dig-Next-2 power hold timing must be defined"

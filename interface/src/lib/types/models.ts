@@ -114,6 +114,7 @@ export type SystemStatus = {
 	restartNeeded: boolean;
 	saveNeeded: boolean;
 	hostName: string;
+	goldenPresent?: boolean;
 };
 
 export type Battery = {

@@ -16,7 +16,8 @@ let telemetry_data = {
 		safeMode: false,
 		restartNeeded: false,
 		saveNeeded: false,
-		hostName: localStorage.getItem('hostName') || 'MoonLight' // 🌙 persist across page loads
+		hostName: localStorage.getItem('hostName') || 'MoonLight', // 🌙 persist across page loads
+		goldenPresent: false
 	},
 	battery: {
 		soc: -1,
@@ -63,7 +64,8 @@ function createTelemetry() {
 					safeMode: data.safeMode,
 					restartNeeded: data.restartNeeded,
 					saveNeeded: data.saveNeeded,
-					hostName: data.hostName
+					hostName: data.hostName,
+					goldenPresent: data.goldenPresent ?? false
 				}
 			}));
 		},

@@ -13,8 +13,13 @@
 
   #include "FileManager.h"
 
+  #include "MoonBase/GoldenConfig.h"
   #include "MoonBase/SharedFSPersistence.h"
   #include "MoonBase/utilities/PlatformFunctions.h"
+
+inline bool isProtectedFileManagerPath(const char* path) {
+  return isProtectedRecoveryPath(path) || isProtectedGoldenPath(path);
+}
 
 // recursively fill a fileArray with all files and folders on the FS
 void addFolder(File folder, bool showHidden, const JsonArray& fileArray) {
@@ -24,7 +29,7 @@ void addFolder(File folder, bool showHidden, const JsonArray& fileArray) {
     if (!file) {
       break;
     } else {
-      if (!isProtectedRecoveryPath(file.path()) && (showHidden || file.name()[0] != '.')) {
+      if (!isProtectedFileManagerPath(file.path()) && (showHidden || file.name()[0] != '.')) {
         JsonObject fileObject = fileArray.add<JsonObject>();
         fileObject["name"] = (char*)file.name();  // enforces copy, solved in latest arduinojson!, see https://arduinojson.org/news/2024/12/29/arduinojson-7-3/
         fileObject["path"] = (char*)file.path();  // enforces copy, solved in latest arduinojson!, see https://arduinojson.org/news/2024/12/29/arduinojson-7-3/
@@ -71,7 +76,7 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
   if (!deletes.isNull()) {
     for (JsonObject var : deletes) {
       const char* path = var["path"].as<const char*>();
-      if (!path || isProtectedRecoveryPath(path)) {
+      if (!path || isProtectedFileManagerPath(path)) {
         EXT_LOGW(MB_TAG, "Rejected invalid or protected recovery delete path");
         continue;
       }
@@ -90,7 +95,7 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
   if (!news.isNull()) {
     for (JsonObject var : news) {
       const char* path = var["path"].as<const char*>();
-      if (!path || isProtectedRecoveryPath(path)) {
+      if (!path || isProtectedFileManagerPath(path)) {
         EXT_LOGW(MB_TAG, "Rejected invalid or protected recovery create path");
         continue;
       }
@@ -124,7 +129,7 @@ StateUpdateResult FilesState::update(JsonObject& newData, FilesState& state, con
       String sourcePath = source;
       int lastSlash = sourcePath.lastIndexOf('/');
       String destinationPath = (lastSlash >= 0 ? sourcePath.substring(0, lastSlash + 1) : String("/")) + name;
-      if (isProtectedRecoveryPath(sourcePath.c_str()) || isProtectedRecoveryPath(destinationPath.c_str())) {
+      if (isProtectedFileManagerPath(sourcePath.c_str()) || isProtectedFileManagerPath(destinationPath.c_str())) {
         EXT_LOGW(MB_TAG, "Rejected protected recovery update path");
         continue;
       }
@@ -173,7 +178,7 @@ void FileManager::begin() {
 
   // setup the file server
   _server->serveStatic("/rest/file", ESPFS, "/")->setFilter([](PsychicRequest* request) {
-    return !isProtectedRecoveryPath(request->uri().c_str());
+    return !isProtectedFileManagerPath(request->uri().c_str());
   });
 
   _server->on("/rest/saveConfig", HTTP_POST,
@@ -200,6 +205,45 @@ void FileManager::begin() {
 
                     saveNeeded = false;
 
+                    return ESP_OK;
+                  },
+                  AuthenticationPredicates::IS_AUTHENTICATED));
+
+  _server->on("/rest/saveGolden", HTTP_POST,
+              _sveltekit->getSecurityManager()->wrapRequest(
+                  [](PsychicRequest* request) {
+                    if (!goldenDmaReady()) {
+                      request->reply(503, "text/plain", "Insufficient internal RAM for golden snapshot");
+                      return ESP_OK;
+                    }
+                    SharedFSPersistence::writeToFSDelayed('W');
+                    if (!goldenSaveSnapshot()) {
+                      request->reply(500, "text/plain", "Golden snapshot failed");
+                      return ESP_OK;
+                    }
+                    request->reply(200, "application/json", "{\"ok\":true,\"golden\":true}");
+                    return ESP_OK;
+                  },
+                  AuthenticationPredicates::IS_AUTHENTICATED));
+
+  _server->on("/rest/restoreGolden", HTTP_POST,
+              _sveltekit->getSecurityManager()->wrapRequest(
+                  [](PsychicRequest* request) {
+                    if (!goldenConfigPresent()) {
+                      request->reply(404, "text/plain", "No golden snapshot present");
+                      return ESP_OK;
+                    }
+                    if (!goldenDmaReady()) {
+                      request->reply(503, "text/plain", "Insufficient internal RAM for golden restore");
+                      return ESP_OK;
+                    }
+                    if (!goldenRestoreSnapshot()) {
+                      request->reply(500, "text/plain", "Golden restore failed");
+                      return ESP_OK;
+                    }
+                    request->reply(200, "application/json", "{\"ok\":true,\"restart\":true}");
+                    delay(250);
+                    ESP.restart();
                     return ESP_OK;
                   },
                   AuthenticationPredicates::IS_AUTHENTICATED));

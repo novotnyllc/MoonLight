@@ -105,7 +105,6 @@ class ModuleLightsControl : public Module {
   uint8_t pinDigNext2Button1 = UINT8_MAX;
   uint8_t pinDigNext2Button2 = UINT8_MAX;
   uint8_t pinPIR = UINT8_MAX;
-  bool softBlackout = false;
 
   ModuleLightsControl(PsychicHttpServer* server, ESP32SvelteKit* sveltekit, FileManager* fileManager, ModuleIO* moduleIO)
       : Module("lightscontrol", server, sveltekit)
@@ -834,22 +833,22 @@ class ModuleLightsControl : public Module {
     update(newState, ModuleState::update, _moduleName);
   }
 
-  void applySoftBlackout() {
-    // ponytail: no write lock — called from effectTask under LayerMappingReadGuard; only updates per-layer fade state
-    uint8_t target = softBlackout ? 0 : 255;
-    for (VirtualLayer* layer : layerP.layers) {
-      if (!layer) continue;
-      if (layer->transitionTarget != target || layer->transitionBrightness != target || layer->transitionStep != 0) {
-        layer->startTransition(target, 0);
-      }
-    }
+  void stepDigNext2Brightness(int delta) {
+    int brightness = _state.data["brightness"] | 128;
+    brightness += delta;
+    if (brightness < 1) brightness = 1;
+    if (brightness > 255) brightness = 255;
+    JsonDocument doc;
+    JsonObject newState = doc.to<JsonObject>();
+    newState["brightness"] = static_cast<uint8_t>(brightness);
+    update(newState, ModuleState::update, _moduleName);
   }
 
-  void setSoftBlackout(bool enabled) {
-    if (softBlackout == enabled) return;
-    softBlackout = enabled;
-    applySoftBlackout();
-    EXT_LOGI(ML_TAG, "Dig-Next-2 soft blackout %s", enabled ? "on" : "off");
+  void toggleDigNext2Power() {
+    JsonDocument doc;
+    JsonObject newState = doc.to<JsonObject>();
+    newState["lightsOn"] = !_state.data["lightsOn"].as<bool>();
+    update(newState, ModuleState::update, _moduleName);
   }
 
   void handleDigNext2ButtonAction(DigNext2ButtonAction action) {
@@ -860,11 +859,14 @@ class ModuleLightsControl : public Module {
     case DigNext2ButtonAction::PreviousPreset:
       requestPreset(selectDigNext2Preset(true));
       break;
-    case DigNext2ButtonAction::ToggleSoftBlackout:
-      setSoftBlackout(!softBlackout);
+    case DigNext2ButtonAction::BrightnessStepUp:
+      stepDigNext2Brightness(8);
       break;
-    case DigNext2ButtonAction::WakeSoftBlackout:
-      setSoftBlackout(false);
+    case DigNext2ButtonAction::BrightnessStepDown:
+      stepDigNext2Brightness(-8);
+      break;
+    case DigNext2ButtonAction::TogglePower:
+      toggleDigNext2Power();
       break;
     case DigNext2ButtonAction::None:
       break;
@@ -872,14 +874,13 @@ class ModuleLightsControl : public Module {
   }
 
   void pollDigNext2Buttons(uint32_t now) {
-    if (pinDigNext2Button1 != UINT8_MAX) {
-      handleDigNext2ButtonAction(updateDigNext2Button(
-          digNext2Button1State, digitalRead(pinDigNext2Button1) == LOW, now, true, softBlackout));
-    }
-    if (pinDigNext2Button2 != UINT8_MAX) {
-      handleDigNext2ButtonAction(updateDigNext2Button(
-          digNext2Button2State, digitalRead(pinDigNext2Button2) == LOW, now, false, softBlackout));
-    }
+    if (pinDigNext2Button1 == UINT8_MAX && pinDigNext2Button2 == UINT8_MAX) return;
+    DigNext2ButtonInputs inputs;
+    inputs.nowMs = now;
+    inputs.lightsOn = _state.data["lightsOn"] | false;
+    if (pinDigNext2Button1 != UINT8_MAX) inputs.button1 = digitalRead(pinDigNext2Button1) == LOW;
+    if (pinDigNext2Button2 != UINT8_MAX) inputs.button2 = digitalRead(pinDigNext2Button2) == LOW;
+    handleDigNext2ButtonAction(updateDigNext2ButtonsPolicy(digNext2Buttons, inputs));
   }
 
   unsigned long lastPresetTime = 0;
@@ -895,8 +896,7 @@ class ModuleLightsControl : public Module {
   int lastPushPinState = HIGH;
   int lastTogglePinState = HIGH;
   int lastPIRPinState = LOW;
-  DigNext2ButtonState digNext2Button1State;
-  DigNext2ButtonState digNext2Button2State;
+  DigNext2ButtonRuntime digNext2Buttons;
 #if FT_ENABLED(FT_MONITOR)
   LightsHeader lastMonitorHeader{};
   std::vector<uint8_t, VectorRAMAllocator<uint8_t>> lastMonitorPositions;
@@ -946,7 +946,6 @@ class ModuleLightsControl : public Module {
       requestPreset(selectDigNext2Preset(false));
     }
 
-    if (softBlackout) applySoftBlackout();
     pollDigNext2Buttons(millis());
 
     if (pinPushButtonLightsOn != UINT8_MAX) {

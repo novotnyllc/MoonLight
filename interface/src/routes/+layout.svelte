@@ -123,7 +123,8 @@
 			safeMode: false,
 			restartNeeded: false,
 			saveNeeded: false,
-			hostName: $telemetry.status.hostName || 'MoonLight'
+			hostName: $telemetry.status.hostName || 'MoonLight',
+			goldenPresent: false
 		}); // 🌙
 
 		socket.sendEvent('client_info', { visible: false }); // 🌙 
