@@ -427,7 +427,7 @@ class ModuleLightsControl : public Module {
     control = addControl(controls, "firstPreset", "slider", 1, 64);
     control["default"] = 1;
     control = addControl(controls, "lastPreset", "slider", 1, 64);
-    control["default"] = 64;
+    control["default"] = 20;
 
   #if FT_ENABLED(FT_MONITOR)
     control = addControl(controls, "monitorOn", "checkbox");
@@ -663,17 +663,31 @@ class ModuleLightsControl : public Module {
     return false;
   }
 
-  bool refreshBuiltinPresetLabels() {
-    static const char* kVestPresetLabels[] = {
+  static constexpr uint8_t kBuiltinVestPresetCount = 20;
+
+  static const char* builtinVestPresetLabel(uint8_t seq) {
+    static const char* kVestPresetLabels[kBuiltinVestPresetCount] = {
       "Horizon Ring", "Crossing Spiral", "Particle Sphere", "Star Wave",
-      "Wraparound Racers", "Ripple Stars", "Audio Paintbrush", "Audio GEQ"};
+      "Wraparound Racers", "Ripple Stars", "Audio Paintbrush", "Audio GEQ",
+      "Bass Rings", "Freq Wave", "Meteor Rain", "Camp Fire",
+      "Noise Pulse", "Camp Pulse", "DJ Strobe", "Bass Puddles",
+      "White Out", "Twinkle Night", "Grav Meter", "Rainbow Walk"};
+    if (seq < 1 || seq > kBuiltinVestPresetCount) return "";
+    return kVestPresetLabels[seq - 1];
+  }
+
+  static bool isStaleBuiltinPresetLabel(const char* current) {
+    return !current || !current[0] || !std::strcmp(current, "Radar") || !std::strcmp(current, "Lines");
+  }
+
+  bool refreshBuiltinPresetLabels() {
     JsonArray list = _state.data["preset"]["list"];
     JsonArray labels = _state.data["preset"]["labels"];
     bool changed = false;
     if (!list.size()) {
-      for (uint8_t seq = 1; seq <= 8; seq++) {
+      for (uint8_t seq = 1; seq <= kBuiltinVestPresetCount; seq++) {
         list.add(seq);
-        labels.add(kVestPresetLabels[seq - 1]);
+        labels.add(builtinVestPresetLabel(seq));
       }
       changed = true;
     } else {
@@ -684,8 +698,22 @@ class ModuleLightsControl : public Module {
       for (size_t i = 0; i < list.size() && i < labels.size(); i++) {
         int seq = list[i] | 0;
         const char* current = labels[i].as<const char*>();
-        if (seq >= 1 && seq <= 8 && (!current || !current[0] || !std::strcmp(current, "Radar") || !std::strcmp(current, "Lines"))) {
-          labels[i] = kVestPresetLabels[seq - 1];
+        if (seq >= 1 && seq <= static_cast<int>(kBuiltinVestPresetCount) && isStaleBuiltinPresetLabel(current)) {
+          labels[i] = builtinVestPresetLabel(static_cast<uint8_t>(seq));
+          changed = true;
+        }
+      }
+      for (uint8_t seq = 1; seq <= kBuiltinVestPresetCount; seq++) {
+        bool found = false;
+        for (size_t i = 0; i < list.size(); i++) {
+          if ((list[i] | 0) == seq) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          list.add(seq);
+          labels.add(builtinVestPresetLabel(seq));
           changed = true;
         }
       }
@@ -816,6 +844,18 @@ class ModuleLightsControl : public Module {
     case 6: name = "Ripples"; fx["layer"] = 1; fx["label"] = "Ripple Stars"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 50; node["controls"][1]["name"] = "interval"; node["controls"][1]["value"] = 128; break;
     case 7: name = "Paintbrush"; fx["layer"] = 1; fx["label"] = "Audio Paintbrush"; break;
     case 8: name = "GEQ 3D"; fx["label"] = "Audio GEQ"; break;
+    case 9: name = "Audio Rings"; fx["label"] = "Bass Rings"; node["controls"][0]["name"] = "inWards"; node["controls"][0]["value"] = true; break;
+    case 10: name = "Freq Wave"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 140; break;
+    case 11: name = "Meteor"; fx["label"] = "Meteor Rain"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "trail"; node["controls"][1]["value"] = 160; break;
+    case 12: name = "Fire"; fx["layer"] = 1; fx["label"] = "Camp Fire"; node["controls"][0]["name"] = "usePalette"; node["controls"][0]["value"] = true; node["controls"][1]["name"] = "flareDecay"; node["controls"][1]["value"] = 14; break;
+    case 13: name = "Noise Meter"; fx["label"] = "Noise Pulse"; node["controls"][0]["name"] = "fadeRate"; node["controls"][0]["value"] = 248; node["controls"][1]["name"] = "width"; node["controls"][1]["value"] = 180; break;
+    case 14: name = "Heartbeat"; fx["label"] = "Camp Pulse"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 18; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
+    case 15: name = "DJ Light"; fx["label"] = "DJ Strobe"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 220; node["controls"][1]["name"] = "candyFactory"; node["controls"][1]["value"] = true; node["controls"][2]["name"] = "fade"; node["controls"][2]["value"] = 4; break;
+    case 16: name = "Puddle Peak"; fx["label"] = "Bass Puddles"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 180; break;
+    case 17: name = "Solid"; fx["label"] = "White Out"; node["controls"][0]["name"] = "colorMode"; node["controls"][0]["value"] = 0; node["controls"][1]["name"] = "red"; node["controls"][1]["value"] = 255; node["controls"][2]["name"] = "green"; node["controls"][2]["value"] = 200; node["controls"][3]["name"] = "blue"; node["controls"][3]["value"] = 180; node["controls"][4]["name"] = "brightness"; node["controls"][4]["value"] = 220; break;
+    case 18: name = "Color Twinkle"; fx["label"] = "Twinkle Night"; node["controls"][0]["name"] = "fadeSpeed"; node["controls"][0]["value"] = 140; node["controls"][1]["name"] = "spawnSpeed"; node["controls"][1]["value"] = 120; break;
+    case 19: name = "Gravimeter"; fx["label"] = "Grav Meter"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
+    case 20: name = "Rainbow"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 10; node["controls"][1]["name"] = "deltaHue"; node["controls"][1]["value"] = 7; node["controls"][2]["name"] = "usePalette"; node["controls"][2]["value"] = true; break;
     default: return false;
     }
     node["name"] = name;
