@@ -353,6 +353,8 @@ class ModuleLightsControl : public Module {
     control["default"] = true;
     control = addControl(controls, "bootLightsOn", "checkbox");
     control["default"] = true;
+    control = addControl(controls, "bootBrightness", "slider", 1, 255, false, "At power-on");
+    control["default"] = 128;
     control = addControl(controls, "brightness", "slider");
     control["default"] = 20;
     control = addControl(controls, "red", "slider");
@@ -750,8 +752,8 @@ class ModuleLightsControl : public Module {
       JsonDocument powerDoc;
       JsonObject power = powerDoc.to<JsonObject>();
       power["lightsOn"] = true;
-      if ((uint8_t)_state.data["brightness"] < 20) power["brightness"] = 96;
-      update(power, ModuleState::update, String("1"));  // numeric origin persists lightsOn
+      power["brightness"] = (uint8_t)(_state.data["bootBrightness"] | 128);
+      update(power, ModuleState::update, String("1"));  // numeric origin persists lightsOn + boot brightness
     }
 
     bool hasEffect = false;
