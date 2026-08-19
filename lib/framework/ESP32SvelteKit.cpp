@@ -103,14 +103,16 @@ bool ESP32SvelteKit::begin()
     // Serve static resources from PROGMEM
     ESP_LOGV(SVK_TAG, "Registering routes from PROGMEM static resources");
     WWWData::registerRoutes(
-        [&](const String &uri, const String &contentType, const uint8_t *content, size_t len)
+        [&](const String &uri, const String &contentType, const uint8_t *content, size_t len, const char *contentEncoding)
         {
-            PsychicHttpRequestCallback requestHandler = [contentType, content, len](PsychicRequest *request)
+            PsychicHttpRequestCallback requestHandler = [contentType, content, len, contentEncoding](PsychicRequest *request)
             {
                 PsychicResponse response(request);
                 response.setCode(200);
                 response.setContentType(contentType.c_str());
-                response.addHeader("Content-Encoding", "gzip");
+                if (contentEncoding && contentEncoding[0] != '\0') {
+                    response.addHeader("Content-Encoding", contentEncoding);
+                }
                 response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
                 // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
                 size_t chunkSize = 4096;

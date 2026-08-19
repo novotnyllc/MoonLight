@@ -23,6 +23,17 @@ import mimetypes
 import glob
 from datetime import datetime
 
+try:
+    import brotli
+except ImportError:
+    brotli = None
+
+# Already-compressed or binary assets: embed raw bytes (no Content-Encoding).
+SKIP_COMPRESS_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2",
+    ".mp3", ".mp4", ".zip", ".gz", ".br",
+}
+
 # Import shared prebuild utilities
 from prebuild_utils import is_build_task
 
@@ -69,6 +80,21 @@ def gzip_file(file):
         with gzip.open(file + '.gz', 'wb') as f_out:
             copyfileobj(f_in, f_out)
     os.remove(file)
+
+
+def should_compress_asset(asset_path: str) -> bool:
+    suffix = Path(asset_path).suffix.lower()
+    return suffix not in SKIP_COMPRESS_SUFFIXES
+
+
+def compress_asset_bytes(asset_path: str, raw: bytes) -> tuple[bytes, str]:
+    if not should_compress_asset(asset_path):
+        return raw, ""
+    if brotli is None:
+        raise RuntimeError(
+            "brotli package required for EMBED_WWW builds. Install with: pip install brotli"
+        )
+    return brotli.compress(raw, quality=11), "br"
 
 
 def flag_exists(flag):
@@ -122,7 +148,12 @@ def build_progmem():
             asset_var = f"ESP_SVELTEKIT_DATA_{idx}"
             progmem.write(f"// {asset_path}\n")
             progmem.write(f"const uint8_t {asset_var}[] = {{\n\t")
-            file_data = gzip.compress(path.read_bytes())
+            raw = path.read_bytes()
+            file_data, content_encoding = compress_asset_bytes(asset_path, raw)
+            if content_encoding:
+                print(f"  brotli: {len(raw)} -> {len(file_data)} bytes")
+            else:
+                print(f"  raw: {len(file_data)} bytes")
 
             for i, byte in enumerate(file_data):
                 if i and not (i % 16):
@@ -134,10 +165,11 @@ def build_progmem():
                 "name": asset_var,
                 "mime": asset_mime,
                 "size": len(file_data),
+                "encoding": content_encoding,
             }
 
         progmem.write(
-            "typedef std::function<void(const String& uri, const String& contentType, const uint8_t * content, size_t len)> RouteRegistrationHandler;\n\n"
+            "typedef std::function<void(const String& uri, const String& contentType, const uint8_t * content, size_t len, const char* contentEncoding)> RouteRegistrationHandler;\n\n"
         )
         progmem.write("class WWWData {\n")
         progmem.write("\tpublic:\n")
@@ -146,8 +178,9 @@ def build_progmem():
         )
 
         for asset_path, asset in assetMap.items():
+            encoding = asset["encoding"].replace('"', '\\"')
             progmem.write(
-                f'\t\t\thandler("/{asset_path}", "{asset["mime"]}", {asset["name"]}, {asset["size"]});\n'
+                f'\t\t\thandler("/{asset_path}", "{asset["mime"]}", {asset["name"]}, {asset["size"]}, "{encoding}");\n'
             )
 
         progmem.write("\t\t}\n")
