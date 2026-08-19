@@ -121,8 +121,14 @@ void PhysicalLayer::processMappings() {
     }
 
     if (requestMapVirtual.load()) {
-      // Pass 2 writes to channelsD after monitor consumes pass-1 positions.
-      if (lights.header.isPositions == 2) return;
+      // Pass 1 leaves positions in channelsD (isPositions==2) for the monitor.
+      // Waiting here for the UI task deadlocks real LEDs after a crash/restore:
+      // effects cannot map onto the compiled 95-pixel layout until pass 2 runs.
+      if (lights.header.isPositions == 2) {
+        xSemaphoreTake(swapMutex, portMAX_DELAY);
+        lights.header.isPositions = 3;
+        xSemaphoreGive(swapMutex);
+      }
       if (requestMapVirtual.exchange(false)) {
         EXT_LOGD(ML_TAG, "mapLayout virtual requested");
         pass = 2;

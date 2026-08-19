@@ -19,7 +19,7 @@ inline bool isPresetLabelWhitespace(char value) {
   return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' || value == '\v';
 }
 
-inline void extractPresetDisplayLabel(char (&label)[20], const char* explicitLabel, const char* nodeName) {
+inline void extractPresetDisplayLabel(char (&label)[32], const char* explicitLabel, const char* nodeName) {
   label[0] = '\0';
 
   if (explicitLabel) {
@@ -49,11 +49,13 @@ inline void extractPresetDisplayLabel(char (&label)[20], const char* explicitLab
 
 #if FT_MOONLIGHT
 
+
   #include <vector>
 
   #include "FastLED.h"
   #include "MoonBase/Module.h"
   #include "MoonBase/Modules/FileManager.h"
+  #include "MoonBase/utilities/MemAlloc.h"
   #include "MoonBase/Nodes.h"                // for Node::updateControl
   #include "MoonBase/utilities/PlatformFunctions.h"  //for isInPSRAM
   #include "MoonLight/Modules/DigNext2ButtonPolicy.h"
@@ -511,21 +513,12 @@ class ModuleLightsControl : public Module {
         if (updatedItem.value["action"] == "click") {
           updatedItem.value["selected"] = select;  // store the selected preset
           if (select != 255) {
-            if (arrayContainsValue(updatedItem.value["list"], select)) {
-              copyFile(presetFile.c_str(), "/.config/effects.json");
-
-              // trigger notification of update of effects.json
-              _fileManager->update(
-                  [&](FilesState& state) {
-                    state.updatedItems.clear();
-                    state.updatedItems.push_back("/.config/effects.json");
-                    return StateUpdateResult::CHANGED;  // notify StatefulService by returning CHANGED
-                  },
-                  *updatedItem.originId);
-            } else {
-              copyFile("/.config/effects.json", presetFile.c_str());
-              setPresetsFromFolder();  // update presets in UI
-            }
+            // ponytail: coalesce one pending copy; latest click wins if another arrives before loop20ms
+            pendingPresetCopy = true;
+            pendingPresetCopyToEffects = arrayContainsValue(updatedItem.value["list"], select);
+            pendingPresetSelect = select;
+            pendingPresetOrigin = updatedItem.originId ? *updatedItem.originId : String(_moduleName);
+            if (!pendingPresetCopyToEffects) cacheLiveEffectsAsPreset(select);
           }
         } else if (updatedItem.value["action"] == "dblclick") {
           ESPFS.remove(presetFile.c_str());
@@ -536,48 +529,185 @@ class ModuleLightsControl : public Module {
         // old action/select values that would re-trigger preset operations.
         _state.data["preset"].remove("action");
         _state.data["preset"].remove("select");
+        // A click/POST can replace the whole preset object and drop labels.
+        if (_state.data["preset"]["labels"].isNull() || !_state.data["preset"]["labels"].size()) {
+          refreshBuiltinPresetLabels();
+        }
       }
     }
   }
 
   // update _state.data["preset"]["list"] and send update to endpoints
+  struct CachedPreset {
+    uint16_t select = 255;
+    char label[32] = "";
+    char* json = nullptr;
+    size_t jsonLen = 0;
+  };
+  std::vector<CachedPreset, VectorRAMAllocator<CachedPreset>> cachedPresets;
+
+  void clearCachedPresets() {
+    for (CachedPreset& cached : cachedPresets) freeMB(cached.json, "presetCache");
+    cachedPresets.clear();
+  }
+
+  static constexpr size_t kPresetDmaMinBytes = 8192;
+
+  bool dmaCanOpenFile() const {
+    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= kPresetDmaMinBytes;
+  }
+
+  bool cachePresetFile(uint16_t select, File& file, char (&label)[32]) {
+    CachedPreset cached;
+    cached.select = select;
+    std::memcpy(cached.label, label, sizeof(cached.label));
+    const size_t size = file.size();
+    if (!size || size > 12288) return false;
+    cached.json = allocMB<char>(size + 1, "presetCache");
+    if (!cached.json) return false;
+    file.seek(0);
+    const size_t got = file.read(reinterpret_cast<uint8_t*>(cached.json), size);
+    cached.json[got] = '\0';
+    cached.jsonLen = got;
+    cachedPresets.push_back(cached);
+    return true;
+  }
+
+  bool applyCachedPreset(uint16_t select, const String& originId) {
+    for (const CachedPreset& cached : cachedPresets) {
+      if (cached.select != select || !cached.json) continue;
+      JsonDocument doc(JsonRAMAllocator::instance());
+      if (deserializeJson(doc, cached.json, cached.jsonLen) || !doc.is<JsonObject>()) return false;
+      applyEffectsObject(doc.as<JsonObject>(), originId);
+      return true;
+    }
+    return false;
+  }
+
+  void cacheLiveEffectsAsPreset(uint16_t select) {
+    extern std::vector<Module*> modules;
+    Module* effects = nullptr;
+    for (Module* module : modules) {
+      if (module && strcmp(module->_moduleName, "effects") == 0) {
+        effects = module;
+        break;
+      }
+    }
+    if (!effects) return;
+    JsonDocument doc(JsonRAMAllocator::instance());
+    JsonObject root = doc.to<JsonObject>();
+    effects->read(root, ModuleState::read, effects->_moduleName);
+    const size_t needed = measureJson(root);
+    if (!needed || needed > 12288) return;
+    char* json = allocMB<char>(needed + 1, "presetCache");
+    if (!json) return;
+    const size_t wrote = serializeJson(root, json, needed + 1);
+    json[wrote] = '\0';
+    char label[32] = "";
+    const char* explicitLabel = root["label"].as<const char*>();
+    const char* nodeName = nullptr;
+    if (root["nodes"].is<JsonArray>() && root["nodes"].size()) nodeName = root["nodes"][0]["name"].as<const char*>();
+    extractPresetDisplayLabel(label, explicitLabel, nodeName);
+    if (!label[0]) snprintf(label, sizeof(label), "Preset %02u", select);
+    for (CachedPreset& cached : cachedPresets) {
+      if (cached.select == select) {
+        freeMB(cached.json, "presetCache");
+        cached.json = json;
+        cached.jsonLen = wrote;
+        std::memcpy(cached.label, label, sizeof(cached.label));
+        return;
+      }
+    }
+    CachedPreset cached;
+    cached.select = select;
+    std::memcpy(cached.label, label, sizeof(cached.label));
+    cached.json = json;
+    cached.jsonLen = wrote;
+    cachedPresets.push_back(cached);
+    JsonArray list = _state.data["preset"]["list"];
+    JsonArray labels = _state.data["preset"]["labels"];
+    bool found = false;
+    for (size_t i = 0; i < list.size(); i++) {
+      if ((list[i] | 0) == select) {
+        if (i < labels.size()) labels[i] = cached.label;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      list.add(select);
+      labels.add(cached.label);
+    }
+  }
+
+  bool refreshBuiltinPresetLabels() {
+    static const char* kVestPresetLabels[] = {
+      "Horizon Ring", "Crossing Spiral", "Particle Sphere", "Star Wave",
+      "Wraparound Racers", "Ripple Stars", "Audio Paintbrush", "Audio GEQ"};
+    JsonArray list = _state.data["preset"]["list"];
+    JsonArray labels = _state.data["preset"]["labels"];
+    bool changed = false;
+    if (!list.size()) {
+      for (uint8_t seq = 1; seq <= 8; seq++) {
+        list.add(seq);
+        labels.add(kVestPresetLabels[seq - 1]);
+      }
+      changed = true;
+    } else {
+      while (labels.size() < list.size()) {
+        labels.add("");
+        changed = true;
+      }
+      for (size_t i = 0; i < list.size() && i < labels.size(); i++) {
+        int seq = list[i] | 0;
+        const char* current = labels[i].as<const char*>();
+        if (seq >= 1 && seq <= 8 && (!current || !current[0] || !std::strcmp(current, "Radar") || !std::strcmp(current, "Lines"))) {
+          labels[i] = kVestPresetLabels[seq - 1];
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      update([&](ModuleState& state) { return StateUpdateResult::CHANGED; }, _moduleName);
+    }
+    return changed;
+  }
+
   void setPresetsFromFolder() {
-    // loop over all files in the presets folder and add them to the preset array
+    const bool canScan = dmaCanOpenFile();
+    if (!canScan) {
+      EXT_LOGW(ML_TAG, "Preset folder scan skipped (largest internal %u < %u); keeping RAM cache",
+               static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+               static_cast<unsigned>(kPresetDmaMinBytes));
+      refreshBuiltinPresetLabels();
+      return;
+    }
+
     File rootFolder = ESPFS.open("/.config/presets/");
     const bool hadPresets = _state.data["preset"]["list"].size() || _state.data["preset"]["labels"].size();
     _state.data["preset"]["list"].clear();
     _state.data["preset"]["labels"].clear();
+    clearCachedPresets();
     bool changed = hadPresets;
     walkThroughFiles(rootFolder, [&](File folder, File file) {
       int seq = -1;
-      if (sscanf(file.name(), "preset%02d.json", &seq) == 1) {
-        // seq now contains the 2-digit number, e.g., 34
-        // EXT_LOGD(ML_TAG, "Preset %d found", seq);
-        _state.data["preset"]["list"].add(seq);  // add the preset to the preset array
-
-        char label[20] = "";
-        // Extract effect name from preset file for button labels
-        file.seek(0);
-        JsonDocument doc;
-        if (!deserializeJson(doc, file)) {
-          JsonArray nodes = doc["nodes"];
-          const char* nodeName = nodes.size() > 0 ? nodes[0]["name"].as<const char*>() : nullptr;
-          extractPresetDisplayLabel(label, doc["label"].as<const char*>(), nodeName);
-        }
-
-        _state.data["preset"]["labels"].add((const char*)label);
-
-        changed = true;
+      if (sscanf(file.name(), "preset%02d.json", &seq) != 1) return;
+      _state.data["preset"]["list"].add(seq);
+      char label[32] = "";
+      file.seek(0);
+      JsonDocument doc(JsonRAMAllocator::instance());
+      if (!deserializeJson(doc, file)) {
+        JsonArray nodes = doc["nodes"];
+        const char* nodeName = nodes.size() > 0 ? nodes[0]["name"].as<const char*>() : nullptr;
+        extractPresetDisplayLabel(label, doc["label"].as<const char*>(), nodeName);
+        cachePresetFile(seq, file, label);
       }
+      _state.data["preset"]["labels"].add((const char*)label);
+      changed = true;
     });
-
+    if (refreshBuiltinPresetLabels()) changed = true;
     if (changed) {
-      // requestUIUpdate ...
-      update(
-          [&](ModuleState& state) {
-            return StateUpdateResult::CHANGED;  // notify StatefulService by returning CHANGED
-          },
-          _moduleName);
+      update([&](ModuleState& state) { return StateUpdateResult::CHANGED; }, _moduleName);
     }
   }
 
@@ -594,6 +724,82 @@ class ModuleLightsControl : public Module {
         presetList.size(), [&](size_t index) { return presetList[index].as<int>(); }, selected, firstPreset, lastPreset, backwards);
   }
 
+  void forceWearablePowerOn() {
+    // Recovery can restore lightsOff and empty effect layers. Empty layers skip virtual mapping,
+    // so the compiled White Vest 95 layout stays unused and the monitor stays blank.
+    JsonDocument powerDoc;
+    JsonObject power = powerDoc.to<JsonObject>();
+    power["lightsOn"] = true;
+    if ((uint8_t)_state.data["brightness"] < 20) power["brightness"] = 96;
+    update(power, ModuleState::update, String("1"));  // numeric origin persists lightsOn
+
+    bool hasEffect = false;
+    for (VirtualLayer* layer : layerP.layers) {
+      if (layer && !layer->nodes.empty()) {
+        hasEffect = true;
+        break;
+      }
+    }
+    if (!hasEffect) {
+      extern std::vector<Module*> modules;
+      JsonDocument fxDoc;
+      JsonObject fx = fxDoc.to<JsonObject>();
+      fx["layer"] = 0;
+      fx["brightness"] = 220;
+      fx["label"] = "Wraparound Racers";
+      JsonObject node = fx["nodes"].to<JsonArray>().add<JsonObject>();
+      node["name"] = "Wraparound Racers";
+      node["on"] = true;
+      for (Module* module : modules) {
+        if (module && strcmp(module->_moduleName, "effects") == 0) {
+          module->update(fx, ModuleState::update, String("1"));
+          break;
+        }
+      }
+    }
+    setPresetsFromFolder();
+    layerP.requestMapPhysical.store(true);
+    layerP.requestMapVirtual.store(true);
+  }
+
+  void applyEffectsObject(JsonObject obj, const String& originId) {
+    extern std::vector<Module*> modules;
+    for (Module* module : modules) {
+      if (module && strcmp(module->_moduleName, "effects") == 0) {
+        module->updateWithoutPropagation(obj, ModuleState::update, originId);
+        module->update([](ModuleState&) { return StateUpdateResult::CHANGED; }, originId);
+        break;
+      }
+    }
+  }
+
+  bool applyBuiltInVestPreset(uint16_t select, const String& originId) {
+    JsonDocument doc(JsonRAMAllocator::instance());
+    JsonObject fx = doc.to<JsonObject>();
+    fx["layer"] = 0;
+    fx["brightness"] = 220;
+    fx["start"]["x"] = 0; fx["start"]["y"] = 0; fx["start"]["z"] = 0;
+    fx["end"]["x"] = 100; fx["end"]["y"] = 100; fx["end"]["z"] = 100;
+    JsonObject node = fx["nodes"].to<JsonArray>().add<JsonObject>();
+    node["on"] = true;
+    const char* name = nullptr;
+    switch (select) {
+    case 1: name = "Horizon Ring"; node["controls"][0]["name"] = "bpm"; node["controls"][0]["value"] = 20; node["controls"][1]["name"] = "fade"; node["controls"][1]["value"] = 64; node["controls"][2]["name"] = "thickness"; node["controls"][2]["value"] = 2; break;
+    case 2: name = "Crossing Spiral"; node["controls"][0]["name"] = "bpm"; node["controls"][0]["value"] = 32; node["controls"][1]["name"] = "fade"; node["controls"][1]["value"] = 34; node["controls"][2]["name"] = "turns"; node["controls"][2]["value"] = 2; node["controls"][3]["name"] = "width"; node["controls"][3]["value"] = 40; break;
+    case 3: name = "Sphere Move"; fx["label"] = "Particle Sphere"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 46; break;
+    case 4: name = "Star Sky"; fx["layer"] = 1; fx["label"] = "Star Wave"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 4; node["controls"][1]["name"] = "star fill"; node["controls"][1]["value"] = 180; node["controls"][2]["name"] = "usePalette"; node["controls"][2]["value"] = true; break;
+    case 5: name = "Wraparound Racers"; node["controls"][0]["name"] = "bpm"; node["controls"][0]["value"] = 58; node["controls"][1]["name"] = "fade"; node["controls"][1]["value"] = 38; node["controls"][2]["name"] = "racers"; node["controls"][2]["value"] = 6; node["controls"][3]["name"] = "trail"; node["controls"][3]["value"] = 52; break;
+    case 6: name = "Ripples"; fx["layer"] = 1; fx["label"] = "Ripple Stars"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 50; node["controls"][1]["name"] = "interval"; node["controls"][1]["value"] = 128; break;
+    case 7: name = "Paintbrush"; fx["layer"] = 1; fx["label"] = "Audio Paintbrush"; break;
+    case 8: name = "GEQ 3D"; fx["label"] = "Audio GEQ"; break;
+    default: return false;
+    }
+    node["name"] = name;
+    if (fx["label"].isNull()) fx["label"] = name;
+    applyEffectsObject(fx, originId);
+    return true;
+  }
+
   void requestPreset(int select) {
     if (select < 0) return;
 
@@ -606,7 +812,7 @@ class ModuleLightsControl : public Module {
   }
 
   void applySoftBlackout() {
-    LayerMappingGuard guard(layerP.mappingMutex);
+    // ponytail: no write lock — called from effectTask under LayerMappingReadGuard; only updates per-layer fade state
     uint8_t target = softBlackout ? 0 : 255;
     for (VirtualLayer* layer : layerP.layers) {
       if (!layer) continue;
@@ -656,6 +862,10 @@ class ModuleLightsControl : public Module {
   unsigned long lastPresetTime = 0;
   // see pinPushButtonLightsOn
   static constexpr unsigned long debounceDelay = 50;  // 50ms debounce
+  bool pendingPresetCopy = false;
+  bool pendingPresetCopyToEffects = false;
+  uint16_t pendingPresetSelect = 255;
+  String pendingPresetOrigin;
   unsigned long lastPushDebounceTime = 0;
   unsigned long lastToggleDebounceTime = 0;
   unsigned long lastPIRDebounceTime = 0;
@@ -664,9 +874,43 @@ class ModuleLightsControl : public Module {
   int lastPIRPinState = LOW;
   DigNext2ButtonState digNext2Button1State;
   DigNext2ButtonState digNext2Button2State;
+#if FT_ENABLED(FT_MONITOR)
+  LightsHeader lastMonitorHeader{};
+  std::vector<uint8_t, VectorRAMAllocator<uint8_t>> lastMonitorPositions;
+  bool lastMonitorReady = false;
+
+ public:
+  void emitStoredMonitorLayout() {
+    if (!lastMonitorReady) return;
+    _sveltekit->getSocket()->emitEvent("monitor", reinterpret_cast<char*>(&lastMonitorHeader), 47, _moduleName);
+    if (!lastMonitorPositions.empty()) {
+      _sveltekit->getSocket()->emitEvent("monitor", reinterpret_cast<char*>(lastMonitorPositions.data()), lastMonitorPositions.size(), _moduleName);
+    }
+  }
+
+  void storeMonitorLayout(const LightsHeader& header, const uint8_t* positions, size_t positionBytes) {
+    lastMonitorHeader = header;
+    lastMonitorPositions.assign(positions, positions + positionBytes);
+    lastMonitorReady = header.nrOfLights > 0 && positionBytes == static_cast<size_t>(header.nrOfLights) * 3;
+  }
+#endif
 
   void loop20ms() override {
     Module::loop20ms();  // requestUIUpdate
+
+    if (pendingPresetCopy) {
+      pendingPresetCopy = false;
+      Char<32> presetFile;
+      presetFile.format("/.config/presets/preset%02d.json", pendingPresetSelect);
+      const String originId = pendingPresetOrigin;
+      if (pendingPresetCopyToEffects) {
+        if (!applyCachedPreset(pendingPresetSelect, originId) && !applyBuiltInVestPreset(pendingPresetSelect, originId)) {
+          EXT_LOGE(ML_TAG, "Preset %u not in RAM cache; skipped fopen", pendingPresetSelect);
+        }
+      } else {
+        EXT_LOGW(ML_TAG, "Preset save skipped on live path for %s", presetFile.c_str());
+      }
+    }
 
     // process presetLoop
     uint8_t presetLoop = _state.data["presetLoop"];
@@ -737,7 +981,11 @@ class ModuleLightsControl : public Module {
     static LightsHeader monitorHeaderSnapshot;
     bool emitMonitorHeader = false;
     bool emitMonitorData = false;
-    bool monitorEnabled = _sveltekit->getSocket()->getActiveClients() && _state.data["monitorOn"];
+    const bool monitorOn = _state.data["monitorOn"];
+    // The header is one-shot. Do not wait for client_info/visibility: the in-app
+    // browser can stay document.hidden, and subscribe can land after /rest/monitorLayout.
+    // emitEvent already no-ops when nobody is subscribed.
+    const bool streamMonitor = monitorOn && _sveltekit->getSocket()->getConnectedClients();
 
     {
       LayerMappingReadGuard monitorGuard(layerP.mappingMutex);
@@ -747,10 +995,11 @@ class ModuleLightsControl : public Module {
       if (isPositions == 2) {
         if (layerP.lights.channelsD) {
           size_t positionBytes = layerP.lights.header.nrOfLights * 3;
-          if (monitorEnabled) {
+          if (monitorOn) {
             monitorHeaderSnapshot = layerP.lights.header;
             monitorSnapshot.resize(positionBytes);
             memcpy(monitorSnapshot.data(), layerP.lights.channelsD, positionBytes);
+            storeMonitorLayout(monitorHeaderSnapshot, monitorSnapshot.data(), positionBytes);
             emitMonitorHeader = true;
             emitMonitorData = true;
           }
@@ -762,7 +1011,7 @@ class ModuleLightsControl : public Module {
         static unsigned long monitorMillis = 0;
         if (millis() - monitorMillis >= MAX(20, layerP.lights.header.nrOfLights / 300)) {
           monitorMillis = millis();
-          if (layerP.lights.channelsD && monitorEnabled) {
+          if (layerP.lights.channelsD && streamMonitor) {
             size_t channelBytes = layerP.lights.header.nrOfChannels;
             monitorSnapshot.resize(channelBytes);
             memcpy(monitorSnapshot.data(), layerP.lights.channelsD, channelBytes);

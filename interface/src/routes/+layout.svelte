@@ -52,7 +52,12 @@
 
 	onDestroy(() => {
 		removeEventListeners();
+		socket.close();
 	});
+
+	function handlePageHide() {
+		socket.close();
+	}
 
 	const addEventListeners = () => {
 		socket.on('open', handleOpen);
@@ -66,6 +71,7 @@
 		if (page.data.features.download_firmware) socket.on('otastatus', handleOTA);
 		if (page.data.features.ethernet) socket.on('ethernet', handleEthernet);
 		
+		window.addEventListener('pagehide', handlePageHide);
 		document.addEventListener('visibilitychange', handleVisibilityChange); // 🌙 Listen to visibility changes
 	};
 
@@ -82,6 +88,7 @@
 		socket.off('ethernet', handleEthernet);
 
 		document.removeEventListener('visibilitychange', handleVisibilityChange); // 🌙 Clean up clientInfoListener listener and notify server
+		window.removeEventListener('pagehide', handlePageHide);
 	};
 
 	async function validateUser(userdata: userProfile) {
@@ -194,7 +201,7 @@
 			<Statusbar />
 
 			<!-- 🌙 Show Monitor (only if moon screen) -->
-			{#if page.data.features.monitor && page.url.pathname.includes('moon')}
+			{#if page.data.features.monitor && (page.url.pathname.includes('moon') || page.url.searchParams.get('module') === 'lightscontrol' || page.url.pathname === '/' || page.url.pathname === '/index.html')}
 				<!-- <br /> -->
 				<Monitor />
 			{/if}

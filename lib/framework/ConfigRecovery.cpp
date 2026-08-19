@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 
 namespace {
@@ -18,7 +19,7 @@ constexpr const char* SLOT_MANIFEST_TEMP = "/manifest.tmp";
 constexpr const char* SLOT_MANIFEST_V1 = "MoonLightConfigRecovery/1";
 constexpr const char* SLOT_MANIFEST_V2 = "MoonLightConfigRecovery/2";
 constexpr uint32_t SCAN_INTERVAL_MS = 60000;
-constexpr uint32_t CONFIRMATION_MS = 10 * 60 * 1000;
+constexpr uint32_t CONFIRMATION_MS = 3 * 60 * 1000;
 
 struct Fingerprint {
   uint64_t xorHash = 0;
@@ -561,16 +562,7 @@ void ConfigRecovery::loop(bool healthy) {
     candidateHealthy = true;
     candidateSince = now;
   }
-  if ((uint32_t)(now - lastScan) < SCAN_INTERVAL_MS) return;
-  lastScan = now;
-
-  Fingerprint scanned = fingerprintCurrent();
-  if (!scanned.valid) return;
-  if (scanned != currentFingerprint) {
-    currentFingerprint = scanned;
-    candidateSince = now;
-  }
-
+  // ponytail: never fopen the live tree from the SvelteKit loop; confirm the boot fingerprint only.
   recoveryPending = !recoveryAvailable || currentFingerprint != confirmedFingerprint;
   if (recoveryPending && candidateHealthy && (uint32_t)(now - candidateSince) >= CONFIRMATION_MS) {
     promoteCurrent();

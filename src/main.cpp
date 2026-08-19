@@ -417,6 +417,9 @@ void setup() {
   sharedWebSocketServer->begin();
   sharedEventEndpoint->begin();
   sharedFsPersistence->begin();
+#if FT_ENABLED(FT_MOONLIGHT)
+  moduleLightsControl.forceWearablePowerOn();
+#endif
 
   // 🌙
   #if FT_ENABLED(FT_MOONLIGHT)

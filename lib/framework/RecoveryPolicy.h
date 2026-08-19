@@ -36,8 +36,11 @@ class RecoverySoundState {
   std::atomic<bool> sampleSeen{false};
 };
 
+// Restore only a missing/corrupt live tree after a panic.
+// A valid live Save that has not been promoted yet must not be overwritten.
 inline bool recoveryShouldRestore(bool recoveryAvailable, bool failureReset, bool currentValid, bool fingerprintsMatch) {
-  return recoveryAvailable && failureReset && (!currentValid || !fingerprintsMatch);
+  (void)fingerprintsMatch;
+  return recoveryAvailable && failureReset && !currentValid;
 }
 
 inline bool recoverySlotReady(bool manifestValid, bool configReadable, bool livescriptsReadable) {

@@ -301,21 +301,19 @@ class FastLEDAudioDriver : public Node {
 
     sharedData.fl_vocalConfidence = audioProcessor.getVocalConfidence();
     sharedData.fl_beatConfidence = audioProcessor.getBeatConfidence();
-
     sharedData.fl_hihat = audioProcessor.isHiHat();
     sharedData.fl_kick = audioProcessor.isKick();
     sharedData.fl_snare = audioProcessor.isSnare();
     sharedData.fl_tom = audioProcessor.isTom();
-
-    sharedData.fl_beat = sharedData.fl_beatConfidence > 0.5f;  // audioProcessor.isBeat(); // not implemented yet ...
-
+    sharedData.fl_beat = sharedData.fl_beatConfidence > 0.5f;
     sharedData.fl_bpm = audioProcessor.getBPM();
 
     if (millis() - lastTelemetryUpdate >= 500) {
       lastTelemetryUpdate = millis();
       updateControl("samples", samplesCaptured);
       updateControl("level", audioLevel);
-      moduleNodes->queueSnapshot(name());
+      // Keep live meters in RAM. A full drivers snapshot every 500 ms serializes
+      // the module on the only HTTP/WS worker and wedges /rest/driversDef.
     }
   }
 

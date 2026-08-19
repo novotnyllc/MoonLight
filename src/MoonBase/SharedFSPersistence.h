@@ -14,6 +14,11 @@
 
 #include <FS.h>
 #include <StatefulService.h>
+#include <esp_heap_caps.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <cerrno>
 
 #include "Module.h"
 
@@ -178,14 +183,16 @@ class SharedFSPersistence {
     JsonObject root = doc.to<JsonObject>();
     info.module->read(root, ModuleState::read, moduleName);
 
-    // Write to file
-    File file = _fs->open(info.filePath.c_str(), "w");
-    if (!file) return false;
-
-    serializeJson(doc, file);
-    file.close();
-
-    return true;
+    // Arduino File -> fopen -> FILE lock in INTERNAL/DMA. Floppy must not do that.
+    const size_t needed = measureJson(root);
+    if (!needed) return false;
+    char* json = static_cast<char*>(heap_caps_malloc(needed + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!json) json = static_cast<char*>(heap_caps_malloc(needed + 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (!json) return false;
+    const size_t wrote = serializeJson(root, json, needed + 1);
+    const bool ok = writeConfigFd(info.filePath.c_str(), json, wrote);
+    heap_caps_free(json);
+    return ok;
   }
 
   // ADDED: Static method to process all delayed writes
@@ -205,6 +212,36 @@ class SharedFSPersistence {
   }
 
  private:
+  static bool writeConfigFd(const char* modulePath, const char* json, size_t len) {
+    if (!modulePath || !json) return false;
+    char vfsPath[96];
+    snprintf(vfsPath, sizeof(vfsPath), "/littlefs%s", modulePath);
+    char tmpPath[100];
+    snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", vfsPath);
+    const int fd = ::open(tmpPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < len) {
+      const ssize_t n = ::write(fd, json + off, len - off);
+      if (n <= 0) {
+        ::close(fd);
+        ::unlink(tmpPath);
+        return false;
+      }
+      off += static_cast<size_t>(n);
+    }
+    ::fsync(fd);
+    ::close(fd);
+    if (::rename(tmpPath, vfsPath) != 0) {
+      ::unlink(vfsPath);
+      if (::rename(tmpPath, vfsPath) != 0) {
+        ::unlink(tmpPath);
+        return false;
+      }
+    }
+    return true;
+  }
+
   // ADDED: Create directories if they don't exist
   void mkdirs(const String& filePath) {
     int index = 0;

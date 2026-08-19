@@ -41,6 +41,23 @@ TEST_CASE("late mDNS registration announces immediately and keeps GOT_IP handler
   CHECK_EQ(announcements, 2);
 }
 
+TEST_CASE("mDNS starts only with Wi-Fi and leftover internal RAM") {
+  CHECK_FALSE(mdnsShouldStart(true, false, true, 4096, 1024));
+  CHECK_FALSE(mdnsShouldStart(false, true, true, 4096, 1024));
+  CHECK_FALSE(mdnsShouldStart(false, false, false, 4096, 1024));
+  CHECK_FALSE(mdnsShouldStart(false, false, true, 512, 1024));
+  CHECK(mdnsShouldStart(false, false, true, 2048, 1024));
+  CHECK(mdnsShouldStartAtBoot(false, false, 2048, 1024));
+  CHECK_FALSE(mdnsShouldStartAtBoot(false, false, 512, 1024));
+}
+
+TEST_CASE("mDNS announce only after a successful start") {
+  CHECK_FALSE(mdnsShouldAnnounce(false, false, true));
+  CHECK(mdnsShouldAnnounce(true, false, true));
+  CHECK_FALSE(mdnsShouldAnnounce(true, true, true));
+  CHECK_FALSE(mdnsShouldAnnounce(true, false, false));
+}
+
 TEST_CASE("mDNS maintenance queues enable and announce atomically") {
   constexpr unsigned enableIp4 = 1U << 0;
   constexpr unsigned announceIp4 = 1U << 1;
@@ -277,7 +294,7 @@ TEST_CASE("recovery sound health expires without fresh samples") {
 
 TEST_CASE("recovery restores invalid live state only on failure resets") {
   CHECK(recoveryShouldRestore(true, true, false, false));
-  CHECK(recoveryShouldRestore(true, true, true, false));
+  CHECK_FALSE(recoveryShouldRestore(true, true, true, false));
   CHECK_FALSE(recoveryShouldRestore(true, true, true, true));
   CHECK_FALSE(recoveryShouldRestore(true, false, false, false));
   CHECK_FALSE(recoveryShouldRestore(false, true, false, false));

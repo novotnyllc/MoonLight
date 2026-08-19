@@ -104,7 +104,12 @@ void NodeManager::setupDefinition(const JsonArray& controls) {
 }
 
 void NodeManager::onUpdate(const UpdatedItem& updatedItem) {
-  LayerMappingGuard guard(layerP.mappingMutex);
+  // HTTP/WS must not wait forever for a mapping writer. 50ms then skip this update.
+  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(50));
+  if (!guard.ownsLock()) {
+    EXT_LOGW(MB_TAG, "mapping busy; skipped node update %s", updatedItem.name.c_str());
+    return;
+  }
   // handle nodes
   if (updatedItem.parent[0] == "nodes") {  // onNodes
     JsonVariant nodeState = _state.data["nodes"][updatedItem.index[0]];
@@ -271,7 +276,11 @@ void NodeManager::handleNodeControlValueChange(const UpdatedItem& updatedItem, J
 }
 
 void NodeManager::onReOrderSwap(uint8_t stateIndex, uint8_t newIndex) {
-  LayerMappingGuard guard(layerP.mappingMutex);
+  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(50));
+  if (!guard.ownsLock()) {
+    EXT_LOGW(MB_TAG, "mapping busy; skipped reorder %u -> %u", stateIndex, newIndex);
+    return;
+  }
   EXT_LOGD(MB_TAG, "%d %d %d", nodes->size(), stateIndex, newIndex);
   // swap nodes
   Node* nodeS = (*nodes)[stateIndex];

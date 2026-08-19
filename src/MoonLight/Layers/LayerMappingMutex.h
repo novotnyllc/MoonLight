@@ -27,25 +27,38 @@ class LayerMappingMutex {
   LayerMappingMutex(const LayerMappingMutex&) = delete;
   LayerMappingMutex& operator=(const LayerMappingMutex&) = delete;
 
-  void lock() {
+  bool tryLock(TickType_t ticks) {
     TaskHandle_t current = xTaskGetCurrentTaskHandle();
     if (writerOwner.load(std::memory_order_acquire) == current) {
       ++writerDepth;
-      return;
+      return true;
     }
     waitingWriters.fetch_add(1, std::memory_order_acq_rel);
-    xSemaphoreTake(writerMutex, portMAX_DELAY);
+    if (xSemaphoreTake(writerMutex, ticks) != pdTRUE) {
+      waitingWriters.fetch_sub(1, std::memory_order_acq_rel);
+      return false;
+    }
     while (xSemaphoreTake(readersDrained, 0) == pdTRUE) {}
     if ((state.load(std::memory_order_acquire) & WRITER_ACTIVE) == 0) {
       xEventGroupClearBits(readerGate, READERS_ALLOWED);
       state.fetch_or(WRITER_ACTIVE, std::memory_order_acq_rel);
     }
     if ((state.load(std::memory_order_acquire) & READER_COUNT_MASK) != 0) {
-      xSemaphoreTake(readersDrained, portMAX_DELAY);
+      if (xSemaphoreTake(readersDrained, ticks) != pdTRUE) {
+        if (waitingWriters.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+          state.fetch_and(READER_COUNT_MASK, std::memory_order_release);
+          xEventGroupSetBits(readerGate, READERS_ALLOWED);
+        }
+        xSemaphoreGive(writerMutex);
+        return false;
+      }
     }
     writerOwner.store(current, std::memory_order_release);
     writerDepth = 1;
+    return true;
   }
+
+  void lock() { (void)tryLock(portMAX_DELAY); }
 
   void unlock() {
     if (writerOwner.load(std::memory_order_acquire) != xTaskGetCurrentTaskHandle() || writerDepth == 0) return;
@@ -91,9 +104,11 @@ class LayerMappingMutex {
   uint32_t writerDepth = 0;
 };
 #else
+  #include <chrono>
   #include <condition_variable>
   #include <mutex>
   #include <thread>
+  using TickType_t = uint32_t;
 
 class LayerMappingMutex {
  public:
@@ -101,19 +116,26 @@ class LayerMappingMutex {
   LayerMappingMutex(const LayerMappingMutex&) = delete;
   LayerMappingMutex& operator=(const LayerMappingMutex&) = delete;
 
-  void lock() {
+  bool tryLock(TickType_t ticks) {
     std::unique_lock<std::mutex> lock(stateMutex);
     std::thread::id current = std::this_thread::get_id();
     if (writerOwner == current) {
       ++writerDepth;
-      return;
+      return true;
     }
     ++waitingWriters;
-    stateChanged.wait(lock, [&]() { return writerDepth == 0 && readers == 0; });
+    const bool ok = stateChanged.wait_for(lock, std::chrono::milliseconds(ticks), [&]() { return writerDepth == 0 && readers == 0; });
     --waitingWriters;
+    if (!ok) {
+      stateChanged.notify_all();
+      return false;
+    }
     writerOwner = current;
     writerDepth = 1;
+    return true;
   }
+
+  void lock() { (void)tryLock(static_cast<TickType_t>(0xFFFFFFFFu)); }
 
   void unlock() {
     std::lock_guard<std::mutex> lock(stateMutex);
@@ -154,13 +176,16 @@ class LayerMappingMutex {
 
 class LayerMappingGuard {
  public:
-  explicit LayerMappingGuard(LayerMappingMutex& mutex) : mutex(mutex) { mutex.lock(); }
-  ~LayerMappingGuard() { mutex.unlock(); }
+  explicit LayerMappingGuard(LayerMappingMutex& mutex) : mutex(mutex), locked(true) { mutex.lock(); }
+  LayerMappingGuard(LayerMappingMutex& mutex, TickType_t ticks) : mutex(mutex), locked(mutex.tryLock(ticks)) {}
+  ~LayerMappingGuard() { if (locked) mutex.unlock(); }
+  bool ownsLock() const { return locked; }
   LayerMappingGuard(const LayerMappingGuard&) = delete;
   LayerMappingGuard& operator=(const LayerMappingGuard&) = delete;
 
  private:
   LayerMappingMutex& mutex;
+  bool locked;
 };
 
 class LayerMappingReadGuard {

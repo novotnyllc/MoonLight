@@ -23,6 +23,13 @@ export function createWebSocket() {
 		if (ws !== socket || generation !== socketGeneration) return;
 		//console.log('disconnect', reason, event);
 		ws = undefined;
+		if (closedByApp) {
+			set(false);
+			clearTimeout(unresponsiveTimeoutId);
+			clearTimeout(reconnectTimeoutId);
+			listeners.get(reason)?.forEach((listener) => listener(event));
+			return;
+		}
 		if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
 			socket.close();
 		}
@@ -33,7 +40,24 @@ export function createWebSocket() {
 		reconnectTimeoutId = setTimeout(connect, 1000);
 	}
 
+	let closedByApp = false;
+
+	function close() {
+		closedByApp = true;
+		clearTimeout(unresponsiveTimeoutId);
+		clearTimeout(reconnectTimeoutId);
+		const socket = ws;
+		ws = undefined;
+		set(false);
+		if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+			socket.close();
+		}
+	}
+
 	function connect() {
+		if (closedByApp) {
+			closedByApp = false;
+		}
 		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 		//console.log('connect');
 		const socket = new WebSocket(socketUrl);
@@ -154,6 +178,7 @@ export function createWebSocket() {
 		send,
 		sendEvent,
 		init,
+		close,
 		on: <T>(event: string, listener: (data: T) => void): (() => void) => {
 			let eventListeners = listeners.get(event);
 			if (!eventListeners) {
