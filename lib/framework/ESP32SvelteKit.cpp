@@ -95,6 +95,30 @@ bool ESP32SvelteKit::begin()
 #endif
 
 #if FT_ENABLED(FT_WIFI) // 🌙
+    if (!_mdnsLifecycleHooksRegistered)
+    {
+        _mdnsLifecycleHooksRegistered = true;
+        WiFi.onEvent(
+            [this](WiFiEvent_t event, WiFiEventInfo_t) {
+                switch (event)
+                {
+                case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+                    stopMdns();
+                    _lastMdnsMaintain = 0;
+                    _mdnsAnnounceFailures = 0;
+                    break;
+                case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+                    _lastMdnsMaintain = 0;
+                    if (!_mdnsStarted)
+                        startMdns();
+                    else
+                        announceMdnsSta();
+                    break;
+                default:
+                    break;
+                }
+            });
+    }
     _wifiSettingsService.initWiFi();
 #endif
 
@@ -183,8 +207,6 @@ bool ESP32SvelteKit::begin()
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Credentials", "true");
 #endif
 
-    ensureMdns();
-
 #ifdef SERIAL_INFO
     Serial.printf("Running Firmware Version: %s\n", APP_VERSION);
 #endif
@@ -202,6 +224,7 @@ bool ESP32SvelteKit::begin()
     _wifiSettingsService.begin();
     _wifiScanner.begin();
     _wifiStatus.begin();
+    ensureMdns();
 #endif
     _socket.registerEvent("status"); // 🌙 system status event (saveNeeded, restartNeeded, safeMode, hostName)
 #if FT_ENABLED(FT_ETHERNET)
@@ -281,14 +304,25 @@ bool ESP32SvelteKit::begin()
 
 bool ESP32SvelteKit::startMdns()
 {
-    if (_mdnsStarted || safeModeMB)
-        return _mdnsStarted;
+    if (_mdnsStarted)
+        return true;
+
+    if (!WiFi.isConnected())
+        return false;
+
+    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (largestInternal < 1024)
+    {
+        ESP_LOGW(SVK_TAG, "mDNS defer start: largest internal=%u", (unsigned)largestInternal);
+        return false;
+    }
 
     String mdnsHostname = getSystemHostname();
     mdnsHostname.toLowerCase();
     if (!MDNS.begin(mdnsHostname.c_str()))
     {
-        ESP_LOGE(SVK_TAG, "mDNS failed to start for %s", mdnsHostname.c_str());
+        ESP_LOGE(SVK_TAG, "mDNS failed to start for %s (largest internal=%u)", mdnsHostname.c_str(),
+                 (unsigned)largestInternal);
         return false;
     }
 
@@ -296,60 +330,103 @@ bool ESP32SvelteKit::startMdns()
     MDNS.addService("http", "tcp", 80);
     MDNS.addService("ws", "tcp", 80);
     MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
-    auto announceMdnsSta = []() {
-        esp_netif_t *netif = WiFi.STA.netif();
-        if (netif)
-        {
-            maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
-                            [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
-        }
-    };
-    registerMdnsStaGotIp(
-        [](auto announce) {
-            WiFi.onEvent(
-                [announce](WiFiEvent_t, WiFiEventInfo_t) {
-                    announce();
-                },
-                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
-        },
-        []() { return WiFi.isConnected(); },
-        announceMdnsSta);
     _mdnsStarted = true;
+    _lastMdnsAnnounceOk = 0;
+    _mdnsAnnounceFailures = 0;
+    announceMdnsSta();
     ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
     return true;
 }
 
+void ESP32SvelteKit::stopMdns()
+{
+    if (!_mdnsStarted)
+        return;
+    MDNS.end();
+    _mdnsStarted = false;
+    _lastMdnsAnnounceOk = 0;
+    _mdnsAnnounceFailures = 0;
+}
+
+bool ESP32SvelteKit::restartMdns()
+{
+    stopMdns();
+    _lastMdnsMaintain = 0;
+    return startMdns();
+}
+
+bool ESP32SvelteKit::announceMdnsSta()
+{
+    esp_netif_t *netif = WiFi.STA.netif();
+    if (!netif)
+        return false;
+    esp_err_t enable = mdns_netif_action(netif, MDNS_EVENT_ENABLE_IP4);
+    esp_err_t announce = mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
+    if (mdnsAnnounceSucceeded((int)enable, (int)announce))
+    {
+        _lastMdnsAnnounceOk = millis();
+        return true;
+    }
+    return false;
+}
+
 void ESP32SvelteKit::ensureMdns()
 {
+    if (!WiFi.isConnected())
+        return;
+
     const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (mdnsShouldStartAtBoot(_mdnsStarted, safeModeMB, largestInternal, 1024))
+    if (mdnsShouldStart(_mdnsStarted, false, true, largestInternal, 1024))
         startMdns();
 }
 
 void ESP32SvelteKit::maintainMdns()
 {
-    if (safeModeMB || !WiFi.isConnected())
+    if (!WiFi.isConnected())
         return;
 
     const uint32_t now = millis();
-    if (_lastMdnsMaintain && (uint32_t)(now - _lastMdnsMaintain) < 60000UL)
+    constexpr uint32_t kHealthyInterval = 60000UL;
+    constexpr uint32_t kRecoveryInterval = 15000UL;
+    constexpr uint32_t kStaleMs = 90000UL;
+    constexpr uint8_t kMaxAnnounceFailures = 3;
+    constexpr size_t kAnnounceMinInternal = 2048;
+    const uint32_t interval = mdnsMaintainIntervalMs(_mdnsStarted, now, _lastMdnsAnnounceOk, kHealthyInterval,
+                                                     kRecoveryInterval, kStaleMs);
+    if (_lastMdnsMaintain && (uint32_t)(now - _lastMdnsMaintain) < interval)
         return;
     _lastMdnsMaintain = now;
 
     const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (mdnsShouldStart(_mdnsStarted, safeModeMB, true, largestInternal, 1024))
+    if (_mdnsAnnounceFailures >= kMaxAnnounceFailures ||
+        mdnsShouldRestart(_mdnsStarted, false, true, largestInternal, now, _lastMdnsAnnounceOk, kStaleMs, 2048))
+    {
+        ESP_LOGW(SVK_TAG, "mDNS stale/failed, restarting (largest internal=%u, fails=%u)", (unsigned)largestInternal,
+                  (unsigned)_mdnsAnnounceFailures);
+        restartMdns();
+        return;
+    }
+
+    if (mdnsShouldStart(_mdnsStarted, false, true, largestInternal, 1024))
     {
         startMdns();
         return;
     }
-    if (!mdnsShouldAnnounce(_mdnsStarted, safeModeMB, true, largestInternal, 4096))
-        return;
 
-    esp_netif_t *netif = WiFi.STA.netif();
-    if (!netif)
+    if (!mdnsShouldAnnounce(_mdnsStarted, false, true, largestInternal, kAnnounceMinInternal))
+    {
+        if (_mdnsStarted && _lastMdnsAnnounceOk != 0)
+            _lastMdnsAnnounceOk = 0;
         return;
-    maintainMdnsIp4(MDNS_EVENT_ENABLE_IP4, MDNS_EVENT_ANNOUNCE_IP4,
-                    [netif](mdns_event_actions_t action) { mdns_netif_action(netif, action); });
+    }
+
+    if (!announceMdnsSta())
+    {
+        _mdnsAnnounceFailures++;
+        _lastMdnsAnnounceOk = 0;
+    }
+    else
+        _mdnsAnnounceFailures = 0;
 }
 
 void ESP32SvelteKit::_loop()

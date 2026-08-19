@@ -262,8 +262,11 @@ public:
     // Returns: WiFi configured hostname → Ethernet configured hostname → "ML"+last4MAC → "MoonLight".
     // Stable for mDNS, DHCP and AP naming: the result won't flip-flop when interfaces go up/down.
     bool startMdns();
+    void stopMdns();
+    bool restartMdns();
     void ensureMdns();
     void maintainMdns();
+    bool announceMdnsSta();
     String getSystemHostname()
     {
 #if FT_ENABLED(FT_WIFI) // 🌙
@@ -341,6 +344,9 @@ private:
     String _appName = APP_NAME;
     bool _mdnsStarted = false;
     uint32_t _lastMdnsMaintain = 0;
+    uint32_t _lastMdnsAnnounceOk = 0;
+    uint8_t _mdnsAnnounceFailures = 0;
+    bool _mdnsLifecycleHooksRegistered = false;
 
 protected:
     static void _loopImpl(void *_this) { static_cast<ESP32SvelteKit *>(_this)->_loop(); }

@@ -110,3 +110,9 @@ assert "isProtectedGoldenPath" in file_manager_source, "Golden tree must be hidd
 assert "pollDigNext2Buttons" in lights_control_source, "Dig-Next-2 buttons must be polled from loop20ms"
 assert "toggleDigNext2Power" in lights_control_source, "Dig-Next-2 both-hold must toggle relay via lightsOn"
 assert "DIG_NEXT2_BOTH_POWER_MS" in (Path(__file__).parents[1] / "src/MoonLight/Modules/DigNext2ButtonPolicy.h").read_text(), "Dig-Next-2 power hold timing must be defined"
+assert "ARDUINO_EVENT_WIFI_STA_GOT_IP" in sveltekit_source, "mDNS must start/announce on STA GOT_IP"
+assert "kMaxAnnounceFailures" in sveltekit_source, "mDNS must restart after repeated announce failures"
+assert "mdnsShouldStartAtBoot" not in sveltekit_source, "mDNS must not start before Wi-Fi has an address"
+mdns_hook = sveltekit_source.index("_mdnsLifecycleHooksRegistered")
+init_wifi = sveltekit_source.index("_wifiSettingsService.initWiFi()")
+assert mdns_hook < init_wifi, "mDNS hooks must register before Wi-Fi init"
