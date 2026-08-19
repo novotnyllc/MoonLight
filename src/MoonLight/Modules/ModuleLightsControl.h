@@ -131,8 +131,7 @@ class ModuleLightsControl : public Module {
   #ifdef BOARD_HAS_PSRAM
     if (!psramFound) EXT_LOGE(ML_TAG, "Board has PSRAM but not found !!");
   #endif
-
-    setPresetsFromFolder();  // set the right values during boot
+    // Preset list/labels are populated in afterPersistenceLoaded() once lightscontrol.json is read.
 
     // update presets if files changed in presets folder
     _fileManager->addUpdateHandler([this](const String& originId) {
@@ -168,6 +167,9 @@ class ModuleLightsControl : public Module {
     }
   #endif
   }
+
+  // Call after SharedFSPersistence::begin() so persisted lightscontrol.json does not wipe preset list.
+  void afterPersistenceLoaded() { setPresetsFromFolder(); }
 
   #if FT_ENABLED(FT_MQTT)
   void onMqttSettingsChanged() {

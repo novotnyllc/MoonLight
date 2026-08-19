@@ -440,6 +440,7 @@ void setup() {
   sharedEventEndpoint->begin();
   sharedFsPersistence->begin();
 #if FT_ENABLED(FT_MOONLIGHT)
+  moduleLightsControl.afterPersistenceLoaded();
   moduleLightsControl.forceWearablePowerOn();
 #endif
 
