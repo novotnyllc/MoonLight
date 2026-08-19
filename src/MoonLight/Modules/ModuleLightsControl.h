@@ -185,7 +185,7 @@ class ModuleLightsControl : public Module {
       _state.data["lastPreset"] = lastPreset;
       changed = true;
     }
-    if ((_state.data["preset"]["count"] | kBuiltinVestPresetCount) != kBuiltinVestPresetCount) {
+    if ((_state.data["preset"]["count"] | 0) != kBuiltinVestPresetCount) {
       _state.data["preset"]["count"] = kBuiltinVestPresetCount;
       changed = true;
     }
@@ -734,9 +734,12 @@ class ModuleLightsControl : public Module {
       for (size_t i = 0; i < list.size() && i < labels.size(); i++) {
         int seq = list[i] | 0;
         const char* current = labels[i].as<const char*>();
-        if (seq >= 1 && seq <= static_cast<int>(kBuiltinVestPresetCount) && isStaleBuiltinPresetLabel(current)) {
-          labels[i] = builtinVestPresetLabel(static_cast<uint8_t>(seq));
-          changed = true;
+        if (seq >= 1 && seq <= static_cast<int>(kBuiltinVestPresetCount)) {
+          const char* builtin = builtinVestPresetLabel(static_cast<uint8_t>(seq));
+          if (isStaleBuiltinPresetLabel(current) || (builtin[0] && std::strcmp(current, builtin) != 0)) {
+            labels[i] = builtin;
+            changed = true;
+          }
         }
       }
       for (uint8_t seq = 1; seq <= kBuiltinVestPresetCount; seq++) {
