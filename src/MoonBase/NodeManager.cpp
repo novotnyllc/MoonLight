@@ -104,8 +104,8 @@ void NodeManager::setupDefinition(const JsonArray& controls) {
 }
 
 void NodeManager::onUpdate(const UpdatedItem& updatedItem) {
-  // HTTP/WS must not wait forever for a mapping writer. 50ms then skip this update.
-  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(50));
+  // HTTP/WS must not wait forever for a mapping writer. 150ms then skip this update.
+  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(150));
   if (!guard.ownsLock()) {
     EXT_LOGW(MB_TAG, "mapping busy; skipped node update %s", updatedItem.name.c_str());
     return;
@@ -276,7 +276,7 @@ void NodeManager::handleNodeControlValueChange(const UpdatedItem& updatedItem, J
 }
 
 void NodeManager::onReOrderSwap(uint8_t stateIndex, uint8_t newIndex) {
-  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(50));
+  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(150));
   if (!guard.ownsLock()) {
     EXT_LOGW(MB_TAG, "mapping busy; skipped reorder %u -> %u", stateIndex, newIndex);
     return;

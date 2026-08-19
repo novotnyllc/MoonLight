@@ -96,6 +96,9 @@ on_update = lights_control_source.index("void onUpdate")
 loop20ms = lights_control_source.index("void loop20ms() override")
 assert 'copyFile(presetFile.c_str(), "/.config/effects.json")' not in lights_control_source[on_update:loop20ms], "Preset copies must not run on the httpd update path"
 assert 'applyCachedPreset(' in lights_control_source[loop20ms:], 'Preset apply must stay in RAM on loop20ms'
+assert 'writePresetSlotFromCache(' in lights_control_source[loop20ms:], 'Preset slot save must write via fd off the live path'
+assert 'SharedFSPersistence::writeJsonPath' in lights_control_source, 'Preset slot writes must use atomic fd persistence'
 assert 'copyFile(' not in lights_control_source[loop20ms:], 'Preset apply must not copy files on the live path'
+assert 'lastDriversSnapshot' in (Path(__file__).parents[1] / "src/MoonLight/Nodes/Drivers/D_FastLEDAudio.h").read_text(), "Audio driver meters must use throttled snapshots"
 status_handler = system_status_source.index("esp_err_t SystemStatus::systemStatus")
 assert "ESP.getSketchSize()" not in system_status_source[status_handler:], "Live status requests must not re-enter the hardware SHA engine"

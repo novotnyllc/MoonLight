@@ -195,6 +195,9 @@ class SharedFSPersistence {
     return ok;
   }
 
+  // Atomic JSON write without Arduino File/fopen (safe when DMA heap is tight).
+  static bool writeJsonPath(const char* modulePath, const char* json, size_t len) { return writeConfigFd(modulePath, json, len); }
+
   // ADDED: Static method to process all delayed writes
   static void writeToFSDelayed(char writeOrCancel) {
     std::vector<std::function<void(char)>> pending;

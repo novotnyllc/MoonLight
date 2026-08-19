@@ -54,6 +54,7 @@ class FastLEDAudioDriver : public Node {
   uint32_t samplesCaptured = 0;
   uint8_t audioLevel = 0;
   uint32_t lastTelemetryUpdate = 0;
+  uint32_t lastDriversSnapshot = 0;
 
   void setup() override {
     addControl(signalConditioning, "signalConditioning", "checkbox");
@@ -295,8 +296,12 @@ class FastLEDAudioDriver : public Node {
       lastTelemetryUpdate = millis();
       updateControl("samples", samplesCaptured);
       updateControl("level", audioLevel);
-      // Keep live meters in RAM. A full drivers snapshot every 500 ms serializes
-      // the module on the only HTTP/WS worker and wedges /rest/driversDef.
+    }
+    // Refresh driver meters in the UI without wedging HTTP (was 500 ms).
+    if (moduleNodes && millis() - lastDriversSnapshot >= 2000 &&
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= 4096) {
+      lastDriversSnapshot = millis();
+      moduleNodes->queueSnapshot(name());
     }
   }
 

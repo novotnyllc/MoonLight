@@ -55,6 +55,7 @@ inline void extractPresetDisplayLabel(char (&label)[32], const char* explicitLab
   #include "FastLED.h"
   #include "MoonBase/Module.h"
   #include "MoonBase/Modules/FileManager.h"
+  #include "MoonBase/SharedFSPersistence.h"
   #include "MoonBase/utilities/MemAlloc.h"
   #include "MoonBase/Nodes.h"                // for Node::updateControl
   #include "MoonBase/utilities/PlatformFunctions.h"  //for isInPSRAM
@@ -642,6 +643,23 @@ class ModuleLightsControl : public Module {
     }
   }
 
+  bool writePresetSlotFromCache(uint16_t select) {
+    for (const CachedPreset& cached : cachedPresets) {
+      if (cached.select != select || !cached.json || !cached.jsonLen) continue;
+      if (!ESPFS.exists("/.config/presets")) ESPFS.mkdir("/.config/presets");
+      Char<32> presetPath;
+      presetPath.format("/.config/presets/preset%02d.json", select);
+      if (SharedFSPersistence::writeJsonPath(presetPath.c_str(), cached.json, cached.jsonLen)) {
+        EXT_LOGI(ML_TAG, "Wrote preset slot %u (%u bytes)", select, static_cast<unsigned>(cached.jsonLen));
+        return true;
+      }
+      EXT_LOGW(ML_TAG, "Failed to write preset slot %u", select);
+      return false;
+    }
+    EXT_LOGW(ML_TAG, "Preset %u not in RAM cache; cannot write slot file", select);
+    return false;
+  }
+
   bool refreshBuiltinPresetLabels() {
     static const char* kVestPresetLabels[] = {
       "Horizon Ring", "Crossing Spiral", "Particle Sphere", "Star Wave",
@@ -910,8 +928,8 @@ class ModuleLightsControl : public Module {
         if (!applyCachedPreset(pendingPresetSelect, originId) && !applyBuiltInVestPreset(pendingPresetSelect, originId)) {
           EXT_LOGE(ML_TAG, "Preset %u not in RAM cache; skipped fopen", pendingPresetSelect);
         }
-      } else {
-        EXT_LOGW(ML_TAG, "Preset save skipped on live path for %s", presetFile.c_str());
+      } else if (!writePresetSlotFromCache(pendingPresetSelect)) {
+        EXT_LOGW(ML_TAG, "Preset save to %s failed", presetFile.c_str());
       }
     }
 
