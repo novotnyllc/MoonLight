@@ -18,7 +18,6 @@
 #include <cstring>
 #include <map>
 
-#include "HttpRequestContext.h"
 #include "Module.h"
 
 class SharedHttpEndpoint {
@@ -71,10 +70,14 @@ class SharedHttpEndpoint {
 
     JsonObject jsonObject = json.as<JsonObject>();
 
-    struct RestPostScope {
-      RestPostScope() { g_restModulePostActive = true; }
-      ~RestPostScope() { g_restModulePostActive = false; }
-    } restScope;
+    // REST preset apply wedges httpd and corrupts preset metadata (issue #15).
+    if (strcmp(module->_moduleName, "lightscontrol") == 0 && jsonObject["preset"].is<JsonObject>()) {
+      JsonObject preset = jsonObject["preset"].as<JsonObject>();
+      if (preset["action"].is<const char*>() && strcmp(preset["action"], "click") == 0) {
+        return request->reply(409, "application/json",
+                              "{\"error\":\"preset apply via REST disabled; use WebSocket UI\"}");
+      }
+    }
 
     // CHANGED: Use updateWithoutPropagation pattern
     StateUpdateResult outcome = module->updateWithoutPropagation(jsonObject, ModuleState::update, module->_moduleName);

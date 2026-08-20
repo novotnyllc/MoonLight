@@ -220,9 +220,11 @@ esp_err_t SystemStatus::systemStatus(PsychicRequest *request)
     root["lps_drivers"] = esp32sveltekit.lps_drivers;  // 🌙
     root["dma_reserve_armed"] = dmaReserve::armed();
     root["dma_reserve_releases"] = dmaReserve::releases();
-    root["largest_free_dma"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    root["largest_free_dma"] = dmaReserve::largestInternalBlock();
+#if FT_ENABLED(FT_MOONLIGHT)
     extern uint32_t g_presetApplies;
     root["preset_applies"] = g_presetApplies;
+#endif
     // 🌙 Coprocessor firmware version — only on P4 boards with ESP-Hosted WiFi coprocessor
     #if defined(CONFIG_IDF_TARGET_ESP32P4) && FT_ENABLED(FT_WIFI)
         esp_hosted_coprocessor_fwver_t c6_fw_version;

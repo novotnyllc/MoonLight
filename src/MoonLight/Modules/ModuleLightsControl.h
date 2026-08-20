@@ -15,8 +15,6 @@
 #include <cstddef>
 #include <cstring>
 
-#include <esp_heap_caps.h>
-
 inline bool isPresetLabelWhitespace(char value) {
   return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' || value == '\v';
 }
@@ -51,14 +49,13 @@ inline void extractPresetDisplayLabel(char (&label)[32], const char* explicitLab
 
 #if FT_MOONLIGHT
 
-
+  #include <esp_heap_caps.h>
   #include <vector>
 
   #include "FastLED.h"
   #include "MoonBase/Module.h"
   #include "MoonBase/Modules/FileManager.h"
   #include "MoonBase/SharedFSPersistence.h"
-  #include "MoonBase/HttpRequestContext.h"
   #include "MoonBase/utilities/MemAlloc.h"
   #include "MoonBase/Nodes.h"                // for Node::updateControl
   #include "MoonBase/utilities/PlatformFunctions.h"  //for isInPSRAM
@@ -553,15 +550,6 @@ class ModuleLightsControl : public Module {
         }
       }
     } else if (updatedItem.name == "preset") {
-      // REST POST preset clicks wedge httpd (issue #15). UI and buttons use WebSocket/module origin.
-      if (g_restModulePostActive) {
-        JsonVariantConst action = updatedItem.value["action"];
-        if (!action.isNull() && action.as<String>() == "click") {
-          _state.data["preset"].remove("action");
-          _state.data["preset"].remove("select");
-          return;
-        }
-      }
       // copy /.config/effects.json to the hidden folder /.config/presets/preset[x].json
       // do not set preset at boot...
       if (updatedItem.oldValue != "" && !updatedItem.value["action"].isNull()) {
@@ -572,12 +560,9 @@ class ModuleLightsControl : public Module {
         if (updatedItem.value["action"] == "click") {
           updatedItem.value["selected"] = select;  // store the selected preset
           if (select != 255) {
-            // ponytail: coalesce one pending copy; latest click wins if another arrives before loop20ms
-            pendingPresetCopy = true;
-            pendingPresetCopyToEffects = arrayContainsValue(updatedItem.value["list"], select);
-            pendingPresetSelect = select;
-            pendingPresetOrigin = updatedItem.originId ? *updatedItem.originId : String(_moduleName);
-            if (!pendingPresetCopyToEffects) pendingPresetCacheLive = true;
+            const String origin = updatedItem.originId ? *updatedItem.originId : String(_moduleName);
+            const bool copyToEffects = arrayContainsValue(updatedItem.value["list"], select);
+            enqueuePendingPreset(copyToEffects, select, origin);
           }
         } else if (updatedItem.value["action"] == "dblclick") {
           ESPFS.remove(presetFile.c_str());
@@ -613,7 +598,7 @@ class ModuleLightsControl : public Module {
   static constexpr size_t kPresetDmaMinBytes = 8192;
 
   bool dmaCanOpenFile() const {
-    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= kPresetDmaMinBytes;
+    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA) >= kPresetDmaMinBytes;
   }
 
   bool cachePresetFile(uint16_t select, File& file, char (&label)[32]) {
@@ -1016,13 +1001,49 @@ class ModuleLightsControl : public Module {
   unsigned long lastPresetTime = 0;
   // see pinPushButtonLightsOn
   static constexpr unsigned long debounceDelay = 50;  // 50ms debounce
-  bool pendingPresetCopy = false;
-  bool pendingPresetCopyToEffects = false;
-  bool pendingPresetCacheLive = false;
-  uint16_t pendingPresetSelect = 255;
-  String pendingPresetOrigin;
+
+  struct PendingPresetCommand {
+    bool active = false;
+    bool copyToEffects = false;
+    bool cacheLive = false;
+    uint16_t select = 255;
+    char origin[32] = "";
+  };
+  portMUX_TYPE pendingPresetMux = portMUX_INITIALIZER_UNLOCKED;
+  PendingPresetCommand pendingPreset;
   uint32_t lastPresetApplyMs = 0;
   static constexpr uint32_t kMinPresetApplyGapMs = 80;
+
+  void enqueuePendingPreset(bool copyToEffects, uint16_t select, const String& origin) {
+    PendingPresetCommand cmd;
+    cmd.active = true;
+    cmd.copyToEffects = copyToEffects;
+    cmd.cacheLive = !copyToEffects;
+    cmd.select = select;
+    origin.toCharArray(cmd.origin, sizeof(cmd.origin));
+    portENTER_CRITICAL(&pendingPresetMux);
+    pendingPreset = cmd;
+    portEXIT_CRITICAL(&pendingPresetMux);
+  }
+
+  bool takePendingPreset(PendingPresetCommand& out) {
+    portENTER_CRITICAL(&pendingPresetMux);
+    if (!pendingPreset.active) {
+      portEXIT_CRITICAL(&pendingPresetMux);
+      return false;
+    }
+    out = pendingPreset;
+    pendingPreset.active = false;
+    portEXIT_CRITICAL(&pendingPresetMux);
+    return true;
+  }
+
+  void requeuePendingPreset(const PendingPresetCommand& cmd) {
+    portENTER_CRITICAL(&pendingPresetMux);
+    pendingPreset = cmd;
+    portEXIT_CRITICAL(&pendingPresetMux);
+  }
+
   unsigned long lastPushDebounceTime = 0;
   unsigned long lastToggleDebounceTime = 0;
   unsigned long lastPIRDebounceTime = 0;
@@ -1054,30 +1075,28 @@ class ModuleLightsControl : public Module {
   void loop20ms() override {
     Module::loop20ms();  // requestUIUpdate
 
-    if (pendingPresetCopy) {
-      pendingPresetCopy = false;
+    PendingPresetCommand cmd;
+    if (takePendingPreset(cmd)) {
       const uint32_t now = millis();
       if (now - lastPresetApplyMs < kMinPresetApplyGapMs) {
-        pendingPresetCopy = true;
+        requeuePendingPreset(cmd);
       } else {
-      Char<32> presetFile;
-      presetFile.format("/.config/presets/preset%02d.json", pendingPresetSelect);
-      const String originId = pendingPresetOrigin;
-      if (pendingPresetCacheLive) {
-        pendingPresetCacheLive = false;
-        cacheLiveEffectsAsPreset(pendingPresetSelect);
-      }
-      if (pendingPresetCopyToEffects) {
-        g_presetApplies++;
-        lastPresetApplyMs = now;
-        EXT_LOGI(ML_TAG, "preset apply #%u select=%u largestDMA=%u", g_presetApplies, pendingPresetSelect,
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
-        if (!applyCachedPreset(pendingPresetSelect, originId) && !applyBuiltInVestPreset(pendingPresetSelect, originId)) {
-          EXT_LOGE(ML_TAG, "Preset %u not in RAM cache; skipped fopen", pendingPresetSelect);
+        Char<32> presetFile;
+        presetFile.format("/.config/presets/preset%02d.json", cmd.select);
+        const String originId = cmd.origin;
+        if (cmd.cacheLive) cacheLiveEffectsAsPreset(cmd.select);
+        if (cmd.copyToEffects) {
+          EXT_LOGI(ML_TAG, "preset apply select=%u largestDMA=%u",
+                   cmd.select, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+          if (!applyCachedPreset(cmd.select, originId) && !applyBuiltInVestPreset(cmd.select, originId)) {
+            EXT_LOGE(ML_TAG, "Preset %u not in RAM cache; skipped fopen", cmd.select);
+          } else {
+            g_presetApplies++;
+          }
+          lastPresetApplyMs = millis();
+        } else if (!writePresetSlotFromCache(cmd.select)) {
+          EXT_LOGW(ML_TAG, "Preset save to %s failed", presetFile.c_str());
         }
-      } else if (!writePresetSlotFromCache(pendingPresetSelect)) {
-        EXT_LOGW(ML_TAG, "Preset save to %s failed", presetFile.c_str());
-      }
       }
     }
 

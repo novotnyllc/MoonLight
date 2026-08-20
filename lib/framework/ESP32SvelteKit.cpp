@@ -334,7 +334,10 @@ bool ESP32SvelteKit::startMdns()
     _mdnsStarted = true;
     _lastMdnsAnnounceOk = 0;
     _mdnsAnnounceFailures = 0;
-    announceMdnsSta();
+    if (!announceMdnsSta()) {
+      _mdnsAnnounceFailures++;
+      ESP_LOGW(SVK_TAG, "mDNS started but initial announce failed for %s", mdnsHostname.c_str());
+    }
     ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
     return true;
 }
@@ -352,7 +355,6 @@ void ESP32SvelteKit::stopMdns()
 bool ESP32SvelteKit::restartMdns()
 {
     stopMdns();
-    _lastMdnsMaintain = 0;
     return startMdns();
 }
 
@@ -448,7 +450,13 @@ void ESP32SvelteKit::_loop()
         wifi_eth_combined = false;
 #if FT_ENABLED(FT_WIFI) // 🌙
         _wifiSettingsService.loop(); // 30 seconds
-        if (dmaReserve::check(millis())) ensureMdns();
+        if (dmaReserve::check(millis())) {
+            _lastMdnsMaintain = 0;
+            if (_mdnsStarted)
+                restartMdns();
+            else
+                startMdns();
+        }
         maintainMdns();
         _apSettingsService.loop();   // 10 seconds
 #endif

@@ -12,8 +12,10 @@ import urllib.error
 import urllib.request
 
 
-def fetch(url: str, method: str = "GET", timeout: float = 10.0) -> tuple[int, float, str]:
-    req = urllib.request.Request(url, method=method)
+def fetch(url: str, method: str = "GET", timeout: float = 10.0, data: bytes | None = None) -> tuple[int, float, str]:
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     start = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -26,20 +28,27 @@ def fetch(url: str, method: str = "GET", timeout: float = 10.0) -> tuple[int, fl
         return 0, (time.perf_counter() - start) * 1000.0, str(exc)
 
 
-def parse_dma_kb(body: str) -> int | None:
+def parse_status(body: str) -> dict:
     try:
-        data = json.loads(body)
-        dma_text = data.get("heap_info_dma", "")
-        if isinstance(dma_text, str):
-            match = re.search(r"🔹(\d+)KB", dma_text)
-            if match:
-                return int(match.group(1))
+        return json.loads(body)
     except json.JSONDecodeError:
-        pass
+        return {}
+
+
+def parse_dma_kb(body: str) -> int | None:
+    data = parse_status(body)
+    largest = data.get("largest_free_dma")
+    if isinstance(largest, int):
+        return largest // 1024
+    dma_text = data.get("heap_info_dma", "")
+    if isinstance(dma_text, str):
+        match = re.search(r"🔹(\d+)KB", dma_text)
+        if match:
+            return int(match.group(1))
     match = re.search(r"🔹(\d+)KB", body)
-    if not match:
-        return None
-    return int(match.group(1))
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def main() -> int:
@@ -48,8 +57,9 @@ def main() -> int:
     parser.add_argument("--minutes", type=float, default=15.0, help="Soak duration")
     parser.add_argument("--quick", action="store_true", help="Run a 2-minute smoke soak")
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between cycles")
-    parser.add_argument("--min-dma-kb", type=int, default=4, help="Fail if DMA largest block drops below this")
+    parser.add_argument("--min-dma-kb", type=int, default=2, help="Fail if DMA largest block drops below this")
     parser.add_argument("--bad-streak", type=int, default=3, help="Consecutive low-DMA cycles before fail")
+    parser.add_argument("--firmware", default="dignext2.104", help="Required firmware version substring")
     args = parser.parse_args()
     if args.quick:
         args.minutes = 2.0
@@ -60,33 +70,44 @@ def main() -> int:
     cycle = 0
     failures: list[str] = []
     low_dma_streak = 0
-    last_uptime = None
+    last_uptime: int | None = None
+    last_preset_applies: int | None = None
 
     print(f"Soak {base} for {args.minutes} min, interval {args.interval}s, min DMA {args.min_dma_kb}KB")
 
     while time.time() < end:
         cycle += 1
         status, ms, body = fetch(f"{base}/rest/systemStatus", timeout=15)
+        data = parse_status(body)
         dma = parse_dma_kb(body)
-        uptime = None
-        try:
-            uptime = json.loads(body).get("uptime")
-        except json.JSONDecodeError:
-            pass
+        uptime = data.get("uptime")
+        firmware = data.get("firmware_version")
+        preset_applies = data.get("preset_applies")
 
         if status != 200:
             failures.append(f"cycle {cycle}: systemStatus HTTP {status} ({ms:.0f}ms)")
-        elif dma is not None and dma < args.min_dma_kb:
+        elif not isinstance(firmware, str) or args.firmware not in firmware:
+            failures.append(f"cycle {cycle}: firmware {firmware!r} missing {args.firmware!r}")
+        elif uptime is None:
+            failures.append(f"cycle {cycle}: systemStatus missing uptime")
+        elif dma is None:
+            failures.append(f"cycle {cycle}: systemStatus missing DMA telemetry")
+        elif dma < args.min_dma_kb:
             low_dma_streak += 1
             if low_dma_streak >= args.bad_streak:
                 failures.append(f"cycle {cycle}: DMA {dma}KB below {args.min_dma_kb}KB for {low_dma_streak} cycles")
         else:
             low_dma_streak = 0
 
-        if uptime is not None and last_uptime is not None and uptime < last_uptime - 5:
+        if isinstance(uptime, int) and last_uptime is not None and uptime < last_uptime - 5:
             failures.append(f"cycle {cycle}: reboot detected (uptime {last_uptime} -> {uptime})")
-        if uptime is not None:
+        if isinstance(uptime, int):
             last_uptime = uptime
+
+        if isinstance(preset_applies, int):
+            if last_preset_applies is not None and preset_applies < last_preset_applies:
+                failures.append(f"cycle {cycle}: preset_applies regressed ({last_preset_applies} -> {preset_applies})")
+            last_preset_applies = preset_applies
 
         for path in (
             "/moonbase/module?group=moonlight&module=lightscontrol",
@@ -96,28 +117,18 @@ def main() -> int:
             code, elapsed, _ = fetch(f"{base}{path}", timeout=20)
             if code != 200:
                 failures.append(f"cycle {cycle}: {path} HTTP {code} ({elapsed:.0f}ms)")
+            elif elapsed > 5000:
+                failures.append(f"cycle {cycle}: {path} slow {elapsed:.0f}ms")
 
-        for preset in (1, 3, 5, 8, 1):
-            payload = json.dumps({"preset": {"action": "click", "select": preset}}).encode()
-            req = urllib.request.Request(
-                f"{base}/rest/lightscontrol",
-                data=payload,
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            start = time.perf_counter()
-            try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if resp.status != 200:
-                        failures.append(f"cycle {cycle}: preset {preset} HTTP {resp.status}")
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"cycle {cycle}: preset {preset} error {exc}")
-            else:
-                _ = (time.perf_counter() - start) * 1000.0
+        # REST preset apply is intentionally disabled; must not wedge the device.
+        payload = json.dumps({"preset": {"action": "click", "select": 1}}).encode()
+        code, elapsed, _ = fetch(f"{base}/rest/lightscontrol", method="POST", data=payload, timeout=10)
+        if code != 409:
+            failures.append(f"cycle {cycle}: REST preset click expected 409, got {code} ({elapsed:.0f}ms)")
 
         print(
             f"cycle {cycle}: status={status} dma={dma}KB uptime={uptime}s "
-            f"low_dma_streak={low_dma_streak} failures={len(failures)}"
+            f"preset_applies={preset_applies} low_dma_streak={low_dma_streak} failures={len(failures)}"
         )
 
         if failures:

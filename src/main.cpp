@@ -463,11 +463,10 @@ void setup() {
   moduleLightsControl.afterPersistenceLoaded();
   moduleLightsControl.forceWearablePowerOn();
 #endif
-  dmaReserve::init();
 
   // 🌙
   #if FT_ENABLED(FT_MOONLIGHT)
-  xTaskCreatePinnedToCore(effectTask,          // task function
+  BaseType_t effectOk = xTaskCreatePinnedToCore(effectTask,          // task function
                           "AppEffects",        // name
                           EFFECTS_STACK_SIZE,  // stack size
                           nullptr,             // parameter
@@ -476,7 +475,7 @@ void setup() {
                           0                    // protocol core. high speed effect processing
   );
 
-  xTaskCreatePinnedToCore(driverTask,          // task function
+  BaseType_t driverOk = xTaskCreatePinnedToCore(driverTask,          // task function
                           "AppDrivers",        // name
                           DRIVERS_STACK_SIZE,  // stack size
                           nullptr,             // parameter
@@ -488,7 +487,14 @@ void setup() {
                           1  // Multi-core: application core
     #endif
   );
+  if (effectOk != pdPASS || driverOk != pdPASS) {
+    ESP_LOGE(ML_TAG, "Essential MoonLight tasks failed to start (effects=%d drivers=%d)", (int)effectOk, (int)driverOk);
+  }
   #endif  // MoonLight
+
+#if FT_ENABLED(FT_WIFI)
+  dmaReserve::init();
+#endif
 
   // run UI stuff in the sveltekit task
   esp32sveltekit.addLoopFunction([]() {
