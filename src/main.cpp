@@ -78,6 +78,7 @@ void operator delete[](void* ptr, size_t size) noexcept {
 #endif
 
 #include <ESP32SvelteKit.h>
+#include <DmaReserve.h>
 #include <PsychicHttpServer.h>
 
 #define SERIAL_BAUD_RATE 115200
@@ -462,6 +463,7 @@ void setup() {
   moduleLightsControl.afterPersistenceLoaded();
   moduleLightsControl.forceWearablePowerOn();
 #endif
+  dmaReserve::init();
 
   // 🌙
   #if FT_ENABLED(FT_MOONLIGHT)

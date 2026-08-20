@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <cstring>
 
+#include <esp_heap_caps.h>
+
 inline bool isPresetLabelWhitespace(char value) {
   return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' || value == '\v';
 }
@@ -56,11 +58,15 @@ inline void extractPresetDisplayLabel(char (&label)[32], const char* explicitLab
   #include "MoonBase/Module.h"
   #include "MoonBase/Modules/FileManager.h"
   #include "MoonBase/SharedFSPersistence.h"
+  #include "MoonBase/HttpRequestContext.h"
   #include "MoonBase/utilities/MemAlloc.h"
   #include "MoonBase/Nodes.h"                // for Node::updateControl
   #include "MoonBase/utilities/PlatformFunctions.h"  //for isInPSRAM
   #include "MoonLight/Modules/DigNext2ButtonPolicy.h"
   #include "palettes.h"
+
+inline uint32_t g_presetApplies = 0;
+
   #if FT_LIVESCRIPT
     #include "MoonBase/LiveScriptNode.h"
   #endif
@@ -547,6 +553,15 @@ class ModuleLightsControl : public Module {
         }
       }
     } else if (updatedItem.name == "preset") {
+      // REST POST preset clicks wedge httpd (issue #15). UI and buttons use WebSocket/module origin.
+      if (g_restModulePostActive) {
+        JsonVariantConst action = updatedItem.value["action"];
+        if (!action.isNull() && action.as<String>() == "click") {
+          _state.data["preset"].remove("action");
+          _state.data["preset"].remove("select");
+          return;
+        }
+      }
       // copy /.config/effects.json to the hidden folder /.config/presets/preset[x].json
       // do not set preset at boot...
       if (updatedItem.oldValue != "" && !updatedItem.value["action"].isNull()) {
@@ -562,7 +577,7 @@ class ModuleLightsControl : public Module {
             pendingPresetCopyToEffects = arrayContainsValue(updatedItem.value["list"], select);
             pendingPresetSelect = select;
             pendingPresetOrigin = updatedItem.originId ? *updatedItem.originId : String(_moduleName);
-            if (!pendingPresetCopyToEffects) cacheLiveEffectsAsPreset(select);
+            if (!pendingPresetCopyToEffects) pendingPresetCacheLive = true;
           }
         } else if (updatedItem.value["action"] == "dblclick") {
           ESPFS.remove(presetFile.c_str());
@@ -940,7 +955,7 @@ class ModuleLightsControl : public Module {
   void requestPreset(int select) {
     if (select < 0) return;
 
-    JsonDocument doc;
+    JsonDocument doc(JsonRAMAllocator::instance());
     JsonObject newState = doc.to<JsonObject>();
     newState["preset"] = _state.data["preset"];
     newState["preset"]["action"] = "click";
@@ -953,14 +968,14 @@ class ModuleLightsControl : public Module {
     brightness += delta;
     if (brightness < 1) brightness = 1;
     if (brightness > 255) brightness = 255;
-    JsonDocument doc;
+    JsonDocument doc(JsonRAMAllocator::instance());
     JsonObject newState = doc.to<JsonObject>();
     newState["brightness"] = static_cast<uint8_t>(brightness);
     update(newState, ModuleState::update, _moduleName);
   }
 
   void toggleDigNext2Power() {
-    JsonDocument doc;
+    JsonDocument doc(JsonRAMAllocator::instance());
     JsonObject newState = doc.to<JsonObject>();
     newState["lightsOn"] = !_state.data["lightsOn"].as<bool>();
     update(newState, ModuleState::update, _moduleName);
@@ -1003,8 +1018,11 @@ class ModuleLightsControl : public Module {
   static constexpr unsigned long debounceDelay = 50;  // 50ms debounce
   bool pendingPresetCopy = false;
   bool pendingPresetCopyToEffects = false;
+  bool pendingPresetCacheLive = false;
   uint16_t pendingPresetSelect = 255;
   String pendingPresetOrigin;
+  uint32_t lastPresetApplyMs = 0;
+  static constexpr uint32_t kMinPresetApplyGapMs = 80;
   unsigned long lastPushDebounceTime = 0;
   unsigned long lastToggleDebounceTime = 0;
   unsigned long lastPIRDebounceTime = 0;
@@ -1038,15 +1056,28 @@ class ModuleLightsControl : public Module {
 
     if (pendingPresetCopy) {
       pendingPresetCopy = false;
+      const uint32_t now = millis();
+      if (now - lastPresetApplyMs < kMinPresetApplyGapMs) {
+        pendingPresetCopy = true;
+      } else {
       Char<32> presetFile;
       presetFile.format("/.config/presets/preset%02d.json", pendingPresetSelect);
       const String originId = pendingPresetOrigin;
+      if (pendingPresetCacheLive) {
+        pendingPresetCacheLive = false;
+        cacheLiveEffectsAsPreset(pendingPresetSelect);
+      }
       if (pendingPresetCopyToEffects) {
+        g_presetApplies++;
+        lastPresetApplyMs = now;
+        EXT_LOGI(ML_TAG, "preset apply #%u select=%u largestDMA=%u", g_presetApplies, pendingPresetSelect,
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
         if (!applyCachedPreset(pendingPresetSelect, originId) && !applyBuiltInVestPreset(pendingPresetSelect, originId)) {
           EXT_LOGE(ML_TAG, "Preset %u not in RAM cache; skipped fopen", pendingPresetSelect);
         }
       } else if (!writePresetSlotFromCache(pendingPresetSelect)) {
         EXT_LOGW(ML_TAG, "Preset save to %s failed", presetFile.c_str());
+      }
       }
     }
 

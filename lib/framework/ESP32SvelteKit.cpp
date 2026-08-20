@@ -13,6 +13,7 @@
  **/
 
 #include <ESP32SvelteKit.h>
+#include <DmaReserve.h>
 #include <MdnsRegistrationPolicy.h>
 #include <esp_heap_caps.h>
 
@@ -447,6 +448,7 @@ void ESP32SvelteKit::_loop()
         wifi_eth_combined = false;
 #if FT_ENABLED(FT_WIFI) // 🌙
         _wifiSettingsService.loop(); // 30 seconds
+        if (dmaReserve::check(millis())) ensureMdns();
         maintainMdns();
         _apSettingsService.loop();   // 10 seconds
 #endif

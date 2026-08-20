@@ -15,8 +15,10 @@
 #include <PsychicHttp.h>
 #include <SecurityManager.h>
 
+#include <cstring>
 #include <map>
 
+#include "HttpRequestContext.h"
 #include "Module.h"
 
 class SharedHttpEndpoint {
@@ -69,6 +71,11 @@ class SharedHttpEndpoint {
 
     JsonObject jsonObject = json.as<JsonObject>();
 
+    struct RestPostScope {
+      RestPostScope() { g_restModulePostActive = true; }
+      ~RestPostScope() { g_restModulePostActive = false; }
+    } restScope;
+
     // CHANGED: Use updateWithoutPropagation pattern
     StateUpdateResult outcome = module->updateWithoutPropagation(jsonObject, ModuleState::update, module->_moduleName);
 
@@ -77,6 +84,11 @@ class SharedHttpEndpoint {
     } else if (outcome == StateUpdateResult::CHANGED) {
       // Persist changes to FS
       module->callUpdateHandlers(HTTP_ENDPOINT_ORIGIN_ID);
+    }
+
+    // lightscontrol state is large; serializing it on every POST starves internal DMA RAM.
+    if (strcmp(module->_moduleName, "lightscontrol") == 0) {
+      return request->reply(200, "application/json", "{}");
     }
 
     // ADDED: Return updated state in response
