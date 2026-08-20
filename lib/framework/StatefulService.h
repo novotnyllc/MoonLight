@@ -198,10 +198,7 @@ protected:
     inline void beginTransaction(const String &originId) // 🌙 Add originId
     {
         // 🌙 adding semaphore wait too long logging
-        if (xSemaphoreTakeRecursive(_accessMutex, pdMS_TO_TICKS(500))==pdFALSE) {
-            ESP_LOGW("🐼", "%s _accessMutex %s waited 500ms and continues", pcTaskGetName(xTaskGetCurrentTaskHandle()), originId.c_str());
-            // xSemaphoreTakeRecursive(_accessMutex, portMAX_DELAY);
-        }
+        xSemaphoreTakeRecursive(_accessMutex, portMAX_DELAY);
     }
 
     inline void endTransaction()

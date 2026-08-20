@@ -106,6 +106,14 @@ class Module : public StatefulService<ModuleState> {
   /// persisted file unchanged and read-only (for example, in safe mode).
   virtual bool shouldLoadPersistedState() const { return true; }
 
+  /// Replaces a complete module state document without publishing it. Modules
+  /// with ownership outside ModuleState can override this to tear that state
+  /// down atomically before the document is applied.
+  virtual StateUpdateResult replaceFullState(JsonObject& newData, const String& originId, bool persistedState = false) {
+    (void)persistedState;
+    return updateWithoutPropagation(newData, ModuleState::update, originId);
+  }
+
   /// Called every SvelteKit loop iteration (fastest). Override for high-frequency polling.
   // run in sveltekit task
   virtual void loop() {}

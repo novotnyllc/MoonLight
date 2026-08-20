@@ -13,7 +13,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include <functional>
+#include <string>
 
 #include "MdnsRegistrationPolicy.h"
 #include "MoonBase/utilities/BoardNames.h"
@@ -27,73 +27,112 @@
 // Tests
 // ============================================================
 
-TEST_CASE("late mDNS registration announces immediately and keeps GOT_IP handler") {
-  std::function<void()> gotIpHandler;
-  int announcements = 0;
-
-  registerMdnsStaGotIp(
-      [&](auto handler) { gotIpHandler = handler; },
-      []() { return true; },
-      [&]() { ++announcements; });
-
-  CHECK_EQ(announcements, 1);
-  REQUIRE(gotIpHandler);
-  gotIpHandler();
-  CHECK_EQ(announcements, 2);
+TEST_CASE("mDNS policy clears the connected edge on disconnect") {
+  const MdnsMaintainDecision decision =
+      mdnsMaintainTransition({true, 2, 5000}, false, true, 6000);
+  CHECK(decision.action == MdnsMaintainAction::None);
+  CHECK_FALSE(decision.checkHostname);
+  CHECK_FALSE(decision.state.sawConnected);
+  CHECK(decision.state.announceAttempts == 2);
+  CHECK(decision.state.lastMaintain == 5000);
 }
 
-TEST_CASE("mDNS starts only with Wi-Fi and leftover internal RAM") {
-  CHECK_FALSE(mdnsShouldStart(true, false, true, 4096, 1024));
-  CHECK_FALSE(mdnsShouldStart(false, true, true, 4096, 1024));
-  CHECK_FALSE(mdnsShouldStart(false, false, false, 4096, 1024));
-  CHECK_FALSE(mdnsShouldStart(false, false, true, 512, 1024));
-  CHECK(mdnsShouldStart(false, false, true, 2048, 1024));
-  CHECK(mdnsShouldStartAtBoot(false, false, 2048, 1024));
-  CHECK_FALSE(mdnsShouldStartAtBoot(false, false, 512, 1024));
+TEST_CASE("mDNS policy retries reconnect recovery when the STA netif is absent") {
+  const MdnsMaintainDecision reconnect =
+      mdnsMaintainTransition({false, 0, 0}, true, true, 2000);
+  CHECK(reconnect.action == MdnsMaintainAction::RecoverInterface);
+  CHECK(reconnect.checkHostname);
+  CHECK(reconnect.state.sawConnected);
+  CHECK(reconnect.state.announceAttempts == 3);
+  CHECK(reconnect.state.lastMaintain == 1000);
+
+  // The caller leaves this state unchanged when WiFi.STA.netif() is null.
+  const MdnsMaintainDecision retry =
+      mdnsMaintainTransition(reconnect.state, true, true, 3000);
+  CHECK(retry.action == MdnsMaintainAction::RecoverInterface);
+  CHECK(retry.checkHostname);
+  CHECK(retry.state.announceAttempts == 3);
+  CHECK(retry.state.lastMaintain == 1000);
 }
 
-TEST_CASE("mDNS announce only after a successful start") {
-  CHECK_FALSE(mdnsShouldAnnounce(false, false, true));
-  CHECK(mdnsShouldAnnounce(true, false, true));
-  CHECK_FALSE(mdnsShouldAnnounce(true, true, true));
-  CHECK_FALSE(mdnsShouldAnnounce(true, false, false));
+TEST_CASE("mDNS policy bounds a recovery burst to three attempts") {
+  MdnsMaintainState state{true, 3, 1000};
+  for (uint32_t now = 2000; now <= 4000; now += 1000) {
+    const MdnsMaintainDecision decision =
+        mdnsMaintainTransition(state, true, true, now);
+    CHECK(decision.action == MdnsMaintainAction::RecoverInterface);
+    CHECK(decision.checkHostname == (now == 2000));
+    state = mdnsMaintainComplete(decision.state, now);
+  }
+  CHECK(state.announceAttempts == 0);
+  CHECK(state.lastMaintain == 4000);
+  CHECK(mdnsMaintainTransition(state, true, true, 59999).action == MdnsMaintainAction::None);
 }
 
-TEST_CASE("mDNS maintenance queues enable and announce atomically") {
-  constexpr unsigned enableIp4 = 1U << 0;
-  constexpr unsigned announceIp4 = 1U << 1;
-  int sends = 0;
-  unsigned action = 0;
+TEST_CASE("mDNS policy refreshes only the HTTP service once per minute") {
+  const MdnsMaintainDecision early =
+      mdnsMaintainTransition({true, 0, 4000}, true, true, 63999);
+  CHECK(early.action == MdnsMaintainAction::None);
 
-  maintainMdnsIp4(enableIp4, announceIp4, [&](unsigned value) {
-    ++sends;
-    action = value;
-  });
+  const MdnsMaintainDecision decision =
+      mdnsMaintainTransition({true, 0, 4000}, true, true, 64000);
+  CHECK(decision.action == MdnsMaintainAction::RefreshHttpService);
+  CHECK(decision.checkHostname);
+  CHECK(decision.state.announceAttempts == 0);
+  CHECK(decision.state.lastMaintain == 64000);
 
-  CHECK_EQ(sends, 1);
-  CHECK_EQ(action, enableIp4 | announceIp4);
+  const MdnsMaintainDecision noBurst =
+      mdnsMaintainTransition(decision.state, true, true, 65000);
+  CHECK(noBurst.action == MdnsMaintainAction::None);
 }
 
-TEST_CASE("mDNS restart when started but never announced or stale") {
-  CHECK_FALSE(mdnsShouldRestart(false, false, true, 4096, 100000, 0, 120000, 2048));
-  CHECK(mdnsShouldRestart(true, false, true, 4096, 100000, 0, 120000, 2048));
-  CHECK_FALSE(mdnsShouldRestart(true, false, true, 1024, 100000, 0, 120000, 2048));
-  CHECK(mdnsShouldRestart(true, false, true, 4096, 250000, 100000, 120000, 2048));
-  CHECK_FALSE(mdnsShouldRestart(true, false, true, 4096, 150000, 100000, 120000, 2048));
+TEST_CASE("mDNS policy retries an unstarted responder every 15 seconds") {
+  const MdnsMaintainDecision early =
+      mdnsMaintainTransition({false, 0, 1000}, true, false, 15999);
+  CHECK(early.action == MdnsMaintainAction::None);
+  CHECK(early.state.lastMaintain == 1000);
+
+  const MdnsMaintainDecision retry =
+      mdnsMaintainTransition(early.state, true, false, 16000);
+  CHECK(retry.action == MdnsMaintainAction::CheckStart);
+  CHECK_FALSE(retry.checkHostname);
+  CHECK(retry.state.lastMaintain == 16000);
 }
 
-TEST_CASE("mDNS maintenance interval speeds up during recovery") {
-  CHECK_EQ(mdnsMaintainIntervalMs(false, 1000, 0, 60000, 15000, 120000), 15000U);
-  CHECK_EQ(mdnsMaintainIntervalMs(true, 1000, 0, 60000, 15000, 120000), 15000U);
-  CHECK_EQ(mdnsMaintainIntervalMs(true, 250000, 100000, 60000, 15000, 120000), 15000U);
-  CHECK_EQ(mdnsMaintainIntervalMs(true, 150000, 100000, 60000, 15000, 120000), 60000U);
+namespace {
+
+struct GoldenTestCleanup {
+  const char* path;
+  ~GoldenTestCleanup() { goldenRemovePath(path); }
+};
+
+bool writeGoldenTestFile(const std::string& path, const char* contents) {
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd < 0) return false;
+  const size_t length = strlen(contents);
+  size_t offset = 0;
+  while (offset < length) {
+    const ssize_t wrote = ::write(fd, contents + offset, length - offset);
+    if (wrote <= 0) {
+      ::close(fd);
+      return false;
+    }
+    offset += static_cast<size_t>(wrote);
+  }
+  ::close(fd);
+  return true;
 }
 
-TEST_CASE("mDNS announce success requires both enable and announce") {
-  CHECK(mdnsAnnounceSucceeded(0, 0));
-  CHECK_FALSE(mdnsAnnounceSucceeded(0, 1));
-  CHECK_FALSE(mdnsAnnounceSucceeded(1, 0));
+std::string readGoldenTestFile(const std::string& path) {
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) return {};
+  char buffer[64];
+  const ssize_t count = ::read(fd, buffer, sizeof(buffer));
+  ::close(fd);
+  return count > 0 ? std::string(buffer, static_cast<size_t>(count)) : std::string();
 }
+
+}  // namespace
 
 TEST_CASE("gcd") {
   CHECK_EQ(gcd(12, 18), 6);
@@ -285,10 +324,85 @@ TEST_CASE("protected golden paths") {
   CHECK(isProtectedGoldenPath("/.config-golden/effects.json"));
   CHECK(isProtectedGoldenPath(".config-golden/presets/preset01.json"));
   CHECK(isProtectedGoldenPath("/foo/../.config-golden/active"));
+  CHECK(isProtectedGoldenPath("/.config-golden-stage"));
+  CHECK(isProtectedGoldenPath("/.config-golden-rollback"));
+  CHECK(isProtectedGoldenPath("/.config-restore-stage"));
+  CHECK(isProtectedGoldenPath("/.config-restore-rollback"));
   CHECK_FALSE(isProtectedGoldenPath("/.config"));
   CHECK_FALSE(isProtectedGoldenPath("/.config-golden-backup"));
   CHECK_FALSE(isProtectedGoldenPath("/foo/.config-goldenish"));
   CHECK_FALSE(isProtectedGoldenPath(nullptr));
+}
+
+TEST_CASE("golden staging failure preserves the current target tree") {
+  char tempRoot[] = "/tmp/moonlight-golden-XXXXXX";
+  REQUIRE(::mkdtemp(tempRoot) != nullptr);
+  GoldenTestCleanup cleanup{tempRoot};
+
+  const std::string target = std::string(tempRoot) + "/target";
+  const std::string stage = std::string(tempRoot) + "/stage";
+  const std::string rollback = std::string(tempRoot) + "/rollback";
+  REQUIRE(::mkdir(target.c_str(), 0777) == 0);
+  REQUIRE(writeGoldenTestFile(target + "/old.json", "old"));
+
+  CHECK_FALSE(goldenStageAndReplaceTree((std::string(tempRoot) + "/missing").c_str(), target.c_str(), stage.c_str(),
+                                        rollback.c_str()));
+  CHECK_EQ(readGoldenTestFile(target + "/old.json"), "old");
+  CHECK_FALSE(goldenPathExists(stage.c_str()));
+  CHECK_FALSE(goldenPathExists(rollback.c_str()));
+}
+
+TEST_CASE("golden staged tree replaces the target after validation") {
+  char tempRoot[] = "/tmp/moonlight-golden-XXXXXX";
+  REQUIRE(::mkdtemp(tempRoot) != nullptr);
+  GoldenTestCleanup cleanup{tempRoot};
+
+  const std::string source = std::string(tempRoot) + "/source";
+  const std::string target = std::string(tempRoot) + "/target";
+  const std::string stage = std::string(tempRoot) + "/stage";
+  const std::string rollback = std::string(tempRoot) + "/rollback";
+  REQUIRE(::mkdir(source.c_str(), 0777) == 0);
+  REQUIRE(::mkdir(target.c_str(), 0777) == 0);
+  REQUIRE(writeGoldenTestFile(source + "/new.json", "new-state"));
+  REQUIRE(writeGoldenTestFile(target + "/old.json", "old-state"));
+
+  CHECK(goldenStageAndReplaceTree(source.c_str(), target.c_str(), stage.c_str(), rollback.c_str()));
+  CHECK(goldenTreesMatch(source.c_str(), target.c_str()));
+  CHECK_EQ(readGoldenTestFile(target + "/new.json"), "new-state");
+  CHECK_FALSE(goldenPathExists((target + "/old.json").c_str()));
+  CHECK_FALSE(goldenPathExists(stage.c_str()));
+  CHECK_FALSE(goldenPathExists(rollback.c_str()));
+}
+
+TEST_CASE("golden swap rolls the prior tree back when stage install fails") {
+  char tempRoot[] = "/tmp/moonlight-golden-XXXXXX";
+  REQUIRE(::mkdtemp(tempRoot) != nullptr);
+  GoldenTestCleanup cleanup{tempRoot};
+
+  const std::string target = std::string(tempRoot) + "/target";
+  const std::string missingStage = std::string(tempRoot) + "/missing-stage";
+  const std::string rollback = std::string(tempRoot) + "/rollback";
+  REQUIRE(::mkdir(target.c_str(), 0777) == 0);
+  REQUIRE(writeGoldenTestFile(target + "/old.json", "old"));
+
+  CHECK_FALSE(goldenSwapStagedTree(missingStage.c_str(), target.c_str(), rollback.c_str()));
+  CHECK_EQ(readGoldenTestFile(target + "/old.json"), "old");
+  CHECK_FALSE(goldenPathExists(rollback.c_str()));
+}
+
+TEST_CASE("golden entry recovery restores an interrupted rollback tree") {
+  char tempRoot[] = "/tmp/moonlight-golden-XXXXXX";
+  REQUIRE(::mkdtemp(tempRoot) != nullptr);
+  GoldenTestCleanup cleanup{tempRoot};
+
+  const std::string target = std::string(tempRoot) + "/target";
+  const std::string rollback = std::string(tempRoot) + "/rollback";
+  REQUIRE(::mkdir(rollback.c_str(), 0777) == 0);
+  REQUIRE(writeGoldenTestFile(rollback + "/old.json", "old-state"));
+
+  CHECK(goldenRecoverInterruptedSwap(target.c_str(), rollback.c_str()));
+  CHECK_EQ(readGoldenTestFile(target + "/old.json"), "old-state");
+  CHECK_FALSE(goldenPathExists(rollback.c_str()));
 }
 
 TEST_CASE("protected recovery paths") {

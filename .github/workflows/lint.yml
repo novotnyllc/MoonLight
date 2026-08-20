@@ -124,3 +124,23 @@ jobs:
 
       - name: Run native tests
         run: pio test -e native
+
+  release-gates:
+    name: Release gates (Pico2 + heap hardening)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Check WebSocket and heap hardening invariants
+        run: python3 scripts/check_ws_heap_hardening.py
+
+      - name: Build esp32-d0-pico2
+        run: pio run -e esp32-d0-pico2

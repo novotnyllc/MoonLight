@@ -14,13 +14,12 @@
 #   the terms of the LGPL v3 license. See the LICENSE file for details.
 
 from pathlib import Path
-from shutil import copytree, rmtree, copyfileobj
+from shutil import copytree, rmtree
 from os.path import exists, getmtime
 import os
 import sys
 import gzip
 import mimetypes
-import glob
 from datetime import datetime
 
 # Already-compressed or binary assets: embed raw bytes (no Content-Encoding).
@@ -51,10 +50,10 @@ filesystem_dir = project_dir + "/data/www"
 
 
 def find_latest_timestamp_for_app():
-    inputs = glob.glob(f"{source_www_dir}/**/*", recursive=True)
-    inputs += glob.glob(f"{interface_dir}/*.config.*")
-    inputs += glob.glob(f"{interface_dir}/package*.json")
-    return max(getmtime(f) for f in inputs if os.path.isfile(f))
+    inputs = [Path(project_dir, "scripts", "build_interface.py"), *Path(source_www_dir).rglob("*"), *Path(interface_dir).glob("*.config.*")]
+    inputs += list(Path(interface_dir).glob("package*.json"))
+    inputs += list(Path(interface_dir, "static").rglob("*"))
+    return max(path.stat().st_mtime for path in inputs if path.is_file())
 
 
 def should_regenerate_output_file():
@@ -71,10 +70,9 @@ def should_regenerate_output_file():
 
 
 def gzip_file(file):
-    with open(file, 'rb') as f_in:
-        with gzip.open(file + '.gz', 'wb') as f_out:
-            copyfileobj(f_in, f_out)
-    os.remove(file)
+    raw = Path(file).read_bytes()
+    Path(file + ".gz").write_bytes(gzip.compress(raw, compresslevel=9, mtime=0))
+    Path(file).unlink()
 
 
 def should_compress_asset(asset_path: str) -> bool:
@@ -86,7 +84,7 @@ def compress_asset_bytes(asset_path: str, raw: bytes) -> tuple[bytes, str]:
     if not should_compress_asset(asset_path):
         return raw, ""
     # ponytail: gzip not brotli — ESP embeds one encoding; br breaks clients without br decode
-    return gzip.compress(raw, compresslevel=9), "gzip"
+    return gzip.compress(raw, compresslevel=9, mtime=0), "gzip"
 
 
 def flag_exists(flag):
@@ -130,7 +128,11 @@ def build_progmem():
 
         assetMap = {}
 
-        for idx, path in enumerate(Path(build_dir).rglob("*.*")):
+        assets = sorted(
+            Path(build_dir).rglob("*.*"),
+            key=lambda path: path.relative_to(build_dir).as_posix(),
+        )
+        for idx, path in enumerate(assets):
             asset_path = path.relative_to(build_dir).as_posix()
             asset_mime = (
                 mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
@@ -143,7 +145,7 @@ def build_progmem():
             raw = path.read_bytes()
             file_data, content_encoding = compress_asset_bytes(asset_path, raw)
             if content_encoding:
-                print(f"  brotli: {len(raw)} -> {len(file_data)} bytes")
+                print(f"  gzip: {len(raw)} -> {len(file_data)} bytes")
             else:
                 print(f"  raw: {len(file_data)} bytes")
 
@@ -186,8 +188,9 @@ def add_app_to_filesystem():
         rmtree(www_path)
     print("Copying and compress interface to data directory")
     copytree(build_path, www_path)
-    for current_path, _, files in os.walk(www_path):
-        for file in files:
+    for current_path, directories, files in os.walk(www_path):
+        directories.sort()
+        for file in sorted(files):
             gzip_file(os.path.join(current_path, file))
     if ("upload" in BUILD_TARGETS):
         print("Build LittleFS file system image and upload to ESP32")

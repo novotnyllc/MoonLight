@@ -70,8 +70,14 @@ inline DigNext2ButtonAction updateDigNext2ButtonsPolicy(DigNext2ButtonRuntime& r
 
   if (both) {
     if (!bothWas) {
+      if (rt.suppressShortUntilRelease) {
+        rt.b1Down = true;
+        rt.b2Down = true;
+        return DigNext2ButtonAction::None;
+      }
       rt.bothDownAt = in.nowMs;
       rt.bothPowerDone = false;
+      rt.suppressShortUntilRelease = true;
     } else if (!rt.bothPowerDone && in.nowMs - rt.bothDownAt >= DIG_NEXT2_BOTH_POWER_MS) {
       rt.bothPowerDone = true;
       rt.suppressShortUntilRelease = true;
@@ -84,22 +90,30 @@ inline DigNext2ButtonAction updateDigNext2ButtonsPolicy(DigNext2ButtonRuntime& r
 
   if (bothWas) {
     rt.bothDownAt = 0;
-    rt.bothPowerDone = false;
-    rt.suppressShortUntilRelease = false;
   }
 
-  if (!rt.suppressShortUntilRelease) {
-    if (rt.b1Down && !in.button1) {
-      const uint32_t duration = in.nowMs - rt.b1DownAt;
-      if (!rt.b2Down && in.lightsOn && duration <= DIG_NEXT2_SHORT_PRESS_MS) {
-        action = DigNext2ButtonAction::NextPreset;
-      }
+  if (rt.suppressShortUntilRelease) {
+    rt.b1Down = in.button1;
+    rt.b2Down = in.button2;
+    if (!in.button1) rt.b1DownAt = 0;
+    if (!in.button2) rt.b2DownAt = 0;
+    if (!in.button1 && !in.button2) {
+      rt.bothPowerDone = false;
+      rt.suppressShortUntilRelease = false;
     }
-    if (rt.b2Down && !in.button2 && action == DigNext2ButtonAction::None) {
-      const uint32_t duration = in.nowMs - rt.b2DownAt;
-      if (!rt.b1Down && in.lightsOn && duration <= DIG_NEXT2_SHORT_PRESS_MS) {
-        action = DigNext2ButtonAction::PreviousPreset;
-      }
+    return DigNext2ButtonAction::None;
+  }
+
+  if (rt.b1Down && !in.button1) {
+    const uint32_t duration = in.nowMs - rt.b1DownAt;
+    if (!rt.b2Down && in.lightsOn && duration <= DIG_NEXT2_SHORT_PRESS_MS) {
+      action = DigNext2ButtonAction::NextPreset;
+    }
+  }
+  if (rt.b2Down && !in.button2 && action == DigNext2ButtonAction::None) {
+    const uint32_t duration = in.nowMs - rt.b2DownAt;
+    if (!rt.b1Down && in.lightsOn && duration <= DIG_NEXT2_SHORT_PRESS_MS) {
+      action = DigNext2ButtonAction::PreviousPreset;
     }
   }
 

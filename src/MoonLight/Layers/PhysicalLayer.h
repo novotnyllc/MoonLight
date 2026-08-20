@@ -13,6 +13,7 @@
 
 #if FT_MOONLIGHT
 
+  #include <array>
   #include <vector>
   #include <atomic>
 
@@ -40,7 +41,7 @@ class PhysicalLayer {
   Lights lights;
 
   // All virtual layers that map onto this physical layer.
-  std::vector<VirtualLayer*, VectorRAMAllocator<VirtualLayer*>> layers;
+  std::array<VirtualLayer*, 16> layers{};
 
   // Shared colour palette, used by effects that don't define their own.
   CRGBPalette16 palette = PartyColors_p;
@@ -134,9 +135,9 @@ class PhysicalLayer {
   void onLayoutPost();
 
   // Number of VirtualLayer slots currently in use (created and non-null).
-  // Starts at 1 (layer 0 always exists). Incremented by ensureLayer(), decremented when a layer is deleted.
+  // Starts at 0; layer 0 is allocated by ensureLayer() after startup.
   // Use this instead of layers.size() to distinguish active layers from pre-allocated empty slots.
-  uint8_t activeLayerCount = 1;
+  uint8_t activeLayerCount = 0;
 
   // Internal: actual byte count of the channelsD allocation.  Zero until first layout pass 1.
   // Grows lazily inside addLight() (doubling), resized to nrOfChannels at end of pass 1.
@@ -147,6 +148,12 @@ class PhysicalLayer {
   // Ensures the VirtualLayer at the given index exists, creating it on demand if needed.
   // Returns nullptr if index is out of bounds.
   VirtualLayer* ensureLayer(uint8_t index);
+
+  // Retire a layer through the allocator paired with allocMBObject().
+  void destroyLayer(VirtualLayer*& layer);
+
+  // Rebind physical driver/layout nodes after a layer-0 topology replacement.
+  void rebindDriverNodes(VirtualLayer* layer);
 
   // Per-pin LED strip configuration (populated by board presets via ModuleIO).
   uint8_t ledPins[MAXLEDPINS];          // pin numbers in board preset order

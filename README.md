@@ -6,6 +6,20 @@ hide:
 
 # 🌙 MoonLight
 
+## Wearables fork (novotnyllc)
+
+This branch is the **Dig-Next-2 / wearable MoonLight** line for ESP32 Pico boards with PSRAM (White Vest 95 and similar layouts). It tracks upstream MoonLight on `main`, but adds stability and product work needed for battery-powered wearables:
+
+- **DMA-safe preset switching** — RAM cache + built-in vest presets; no `fopen` on the click path
+- **Reliable floppy save** — atomic POSIX writes for module config under memory pressure
+- **HTTP/WebSocket hardening** — PSRAM-first JSON/chunks, socket lifecycle cleanup, bounded HTTP worker stalls
+- **Dig-Next-2 defaults** — lights-on-at-boot option (`bootLightsOn`), soft blackout buttons, compiled White Vest 95 map, custom effects (Horizon Ring, Crossing Spiral, Wraparound Racers, etc.)
+- **Explicit golden recovery** — normal floppy saves are atomic; a user-created golden snapshot restores `/.config` and disables LiveScripts so a bad script cannot recreate a boot loop. LiveScripts must be re-uploaded after restore.
+
+Firmware profile: `esp32-d0-pico2` → version `1.0.1-dignext2.*`. Use the `wearables` branch for field firmware; use `main` for upstream MoonModules parity.
+
+---
+
 <p align="center">
   <img width="350" src="https://github.com/user-attachments/assets/278ed02e-7f7a-497c-80ee-089486ddf379" alt="MoonLight Logo" />
 </p>
@@ -57,20 +71,6 @@ hide:
 <p align="center">
   <a href="https://www.youtube.com/watch?v=TtHu7hYC1oU">▶️ Watch the release 0.7.0 video</a>
 </p>
-
----
-
-## Wearables fork (novotnyllc)
-
-This branch is the **Dig-Next-2 / wearable MoonLight** line for ESP32 Pico boards with PSRAM (White Vest 95 and similar layouts). It tracks upstream MoonLight on `main`, but adds stability and product work needed for battery-powered wearables:
-
-- **DMA-safe preset switching** — RAM cache + built-in vest presets; no `fopen` on the click path
-- **Reliable floppy save** — atomic POSIX writes for module config under memory pressure
-- **HTTP/WebSocket hardening** — PSRAM-first JSON/chunks, socket lifecycle cleanup, bounded HTTP worker stalls
-- **Dig-Next-2 defaults** — lights-on-at-boot option (`bootLightsOn`), soft blackout buttons, compiled White Vest 95 map, custom effects (Horizon Ring, Crossing Spiral, Wraparound Racers, etc.)
-- **No config-recovery rollback** — last floppy save wins; recovery snapshot machinery removed from this branch
-
-Firmware profile: `esp32-d0-pico2` → version `1.0.1-dignext2.*`. Use the `wearables` branch for field firmware; use `main` for upstream MoonModules parity.
 
 ---
 

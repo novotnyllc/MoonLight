@@ -98,4 +98,32 @@ describe('socket lifecycle', () => {
 		current.readyState = MockWebSocket.OPEN;
 		current.onopen!(new Event('open'));
 	});
+
+	it('reopens after a page lifecycle close and resubscribes once', () => {
+		const socket = createWebSocket();
+		socket.on('monitor', () => undefined);
+		socket.init('ws://device/ws/events');
+
+		const first = MockWebSocket.instances[0];
+		const staleClose = first.onclose!;
+		first.readyState = MockWebSocket.OPEN;
+		first.onopen!(new Event('open'));
+		expect(first.sent).toHaveLength(1);
+
+		socket.close();
+		socket.reopen();
+
+		const resumed = MockWebSocket.instances[1];
+		resumed.readyState = MockWebSocket.OPEN;
+		resumed.onopen!(new Event('open'));
+		staleClose(new Event('close') as CloseEvent);
+		vi.advanceTimersByTime(1000);
+
+		expect(MockWebSocket.instances).toHaveLength(2);
+		expect(resumed.sent).toHaveLength(1);
+		expect(msgpack.decode(resumed.sent[0] as Uint8Array)).toEqual({
+			event: 'subscribe',
+			data: 'monitor'
+		});
+	});
 });

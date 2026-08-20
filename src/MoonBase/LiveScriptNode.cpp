@@ -41,9 +41,72 @@ static bool registerNodeForTask(TaskHandle_t task, Node* node) {
   EXT_LOGE(MB_TAG, "gTaskNodeMap full");
   return false;
 }
-static void unregisterNodeForTask(TaskHandle_t task) {
+static void unregisterNodeForTask(TaskHandle_t task, Node* node = nullptr) {
   for (auto& m : gTaskNodeMap)
-    if (m.task == task) { m.task = nullptr; m.node = nullptr; return; }
+    if (m.task == task && (!node || m.node == node)) { m.task = nullptr; m.node = nullptr; return; }
+}
+
+static void unregisterNodeMappings(Node* node) {
+  for (auto& mapping : gTaskNodeMap)
+    if (mapping.node == node) { mapping.task = nullptr; mapping.node = nullptr; }
+}
+
+static void quarantineTask(TaskNodePair mapping, uint32_t& deletedMask) {
+  LiveScriptNode* node = static_cast<LiveScriptNode*>(mapping.node);
+  node->hasLoopTask = false;
+  node->needsExecute = false;
+  node->needsCompile = false;
+
+  Executable* exec = scriptRuntime.findExecutable(node->animation.c_str());
+  int handleIndex = 9999;
+  if (mapping.task && exec && exec->_isRunning && exec->__run_handle_index != 9999) {
+    TaskHandle_t* handle = runningPrograms.getHandleByIndex(exec->__run_handle_index);
+    if (handle && *handle == mapping.task) handleIndex = exec->__run_handle_index;
+  }
+  if (handleIndex != 9999) {
+    EXT_LOGW(MB_TAG, "%s: force-deleting quarantined LiveScript task", node->animation.c_str());
+    // ESPLiveScript::kill() first waits forever at its runtime rendezvous. The
+    // IDF task API is safe from another task and bypasses that wedged barrier.
+    vTaskDeleteWithCaps(mapping.task);
+    runningPrograms.removeHandle(handleIndex);
+    deletedMask |= 1U << handleIndex;
+  } else if (mapping.task) {
+    EXT_LOGW(MB_TAG, "%s: task handle already detached; quarantining executable", node->animation.c_str());
+  }
+
+  if (exec) {
+    exec->_isRunning = false;
+    exec->isHalted = false;
+    exec->__run_handle_index = 9999;
+  }
+  unregisterNodeForTask(mapping.task, mapping.node);
+}
+
+static void quarantineNodeTasks(LiveScriptNode* node) {
+  Executable* exec = scriptRuntime.findExecutable(node->animation.c_str());
+  TaskNodePair ownedTask;
+  ownedTask.node = node;
+  if (exec && exec->_isRunning && exec->__run_handle_index != 9999) {
+    TaskHandle_t* handle = runningPrograms.getHandleByIndex(exec->__run_handle_index);
+    if (handle) ownedTask.task = *handle;
+  }
+
+  uint32_t deletedMask = 0;
+  quarantineTask(ownedTask, deletedMask);
+
+  // Normal task exit removes the vendor handle but not this local lookup.
+  // Clear every entry for the instance without trusting a potentially reused handle.
+  unregisterNodeMappings(node);
+
+  if (deletedMask) {
+    xEventGroupClearBits(xCreatedEventGroup, deletedMask);
+    xEventGroupClearBits(xCreatedEventGroup2, deletedMask);
+  }
+  if (gNode == node) gNode = nullptr;
+
+  // quarantineTask marked the executable stopped, so vendor deleteExe() skips
+  // its blocking kill/freeSync path and releases the compiled binary and data.
+  scriptRuntime.deleteExe(node->animation.c_str());
 }
 
 static void _addControl(uint8_t* var, char* name, char* type, uint8_t min = 0, uint8_t max = UINT8_MAX) {
@@ -176,6 +239,7 @@ void LiveScriptNode::setup() {
   if (animation[0] != '/') {  // no sc script
     return;
   }
+  runtimeLifecycleStarted = true;
 
   // make sure types in below functions are correct !!! otherwise livescript will crash
 
@@ -269,6 +333,12 @@ void LiveScriptNode::setup() {
   startCompile();
 }
 
+void LiveScriptNode::activateDeferredSetup() {
+  if (!setupDeferred) return;
+  setupDeferred = false;
+  setup();
+}
+
 void LiveScriptNode::loop() {
   _updateTime();  // keep hour/minute/second current for clock scripts
   if (!hasLoopTask) return;  // 🌙 only sync scripts whose loop task is actually running
@@ -279,6 +349,7 @@ void LiveScriptNode::loop() {
   if (!exec || !exec->_isRunning) {
     EXT_LOGW(MB_TAG, "%s: livescript task no longer running, disabling sync", animation.c_str());
     hasLoopTask = false;
+    unregisterNodeMappings(this);
     return;
   }
   // 🌙 Only increment scriptsToSync when the give succeeds. If the semaphore is full
@@ -306,18 +377,14 @@ void LiveScriptNode::onLayout() {
 
 LiveScriptNode::~LiveScriptNode() {
   EXT_LOGV(MB_TAG, "%s", animation.c_str());
+  // A rollback can destroy a staged node with the same animation name as the
+  // still-active node. It has not touched the shared runtime and must not kill
+  // the active executable by name.
+  if (!runtimeLifecycleStarted) return;
   // 🌙 Wait for any in-progress compile task to finish before freeing this node,
   // to prevent the compileTask from accessing a dangling this pointer.
   while (compileInProgress) delay(10);
-  // 🌙 Guard against ESPLiveScript freeSync() crash: if getMask()==0 but _isRunning
-  // is true, xEventGroupSync asserts (uxBitsToWaitFor != 0). Force _isRunning false
-  // so Executable::kill() skips the sync path.
-  Executable* exec = scriptRuntime.findExecutable(animation.c_str());
-  if (exec && exec->_isRunning && runningPrograms.getMask() == 0) {
-    EXT_LOGW(MB_TAG, "%s: mask=0 but _isRunning=true, forcing stop to avoid assert", animation.c_str());
-    exec->_isRunning = false;
-  }
-  scriptRuntime.kill(animation.c_str());
+  quarantineNodeTasks(this);
 }
 
 // LiveScriptNode functions
@@ -519,19 +586,14 @@ bool LiveScriptNode::quiesceTimedOutTasks() {
     if (!alreadyPending && pendingCount < MAX_LIVE_SCRIPTS) pending[pendingCount++] = node;
   }
 
-  for (uint8_t i = 0; i < pendingCount; ++i) {
-    pending[i]->needsExecute = false;
-    pending[i]->needsCompile = false;
-    pending[i]->kill();
-  }
+  for (uint8_t i = 0; i < pendingCount; ++i) quarantineNodeTasks(pending[i]);
+  resetSync = false;
+  toResetSync = false;
+  isSyncalled = false;
 
   while (xSemaphoreTake(WaitAnimationSync, 0) == pdTRUE) {}
   while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
 
-  for (uint8_t i = 0; i < pendingCount; ++i) {
-    Executable* exec = scriptRuntime.findExecutable(pending[i]->animation.c_str());
-    if ((exec && exec->_isRunning) || pending[i]->hasLoopTask || pending[i]->needsExecute || pending[i]->needsCompile) return false;
-  }
   for (const auto& mapping : gTaskNodeMap) {
     if (mapping.task || mapping.node) return false;
   }

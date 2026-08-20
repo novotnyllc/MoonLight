@@ -56,6 +56,18 @@
   }
 
 class LayerManager {
+ public:
+  struct PresetReplacementBackup {
+    VirtualLayer* layers[16]{};
+    size_t layerSlots = 0;
+    uint8_t activeLayerCount = 0;
+    uint8_t selectedLayer = 0;
+    bool needsRestore = false;
+    bool requestMapVirtual = false;
+    bool valid = false;
+  };
+
+ private:
   uint8_t selectedLayer = 0;
   bool needsRestore = false;
 
@@ -75,9 +87,9 @@ class LayerManager {
   }
 
   /// Switch the active layer, swapping per-layer JSON state (nodes, start/end/brightness).
-  void selectLayer(uint8_t index, bool swapState = true) {
+  bool selectLayer(uint8_t index, bool swapState = true) {
     LayerMappingGuard guard(layerP.mappingMutex);
-    if (index >= layerP.layers.size()) return;
+    if (index >= layerP.layers.size()) return false;
 
     if (swapState && !state->data["nodes"].isNull()) {
       layerStateSave(state->data, selectedLayer);  // save current layer's node state
@@ -103,57 +115,86 @@ class LayerManager {
 
     selectedLayer = index;
     VirtualLayer* layer = layerP.ensureLayer(selectedLayer);
-    if (!layer) return;  // allocation failed
+    if (!layer) return false;  // allocation failed
     *nodesPtr = &(layer->nodes);
+    return true;
   }
 
-  /// Call before a full state reload from the filesystem (preset switch).
-  /// Destroys all non-selected VirtualLayers and clears their state keys so that compareRecursive
-  /// sees a clean slate and restoreNonSelectedLayers can rebuild from the new preset.
-  void prepareForPresetLoad() {
+  /// Detach the current runtime topology without destroying it, then create an
+  /// empty topology for a complete preset. The caller keeps mappingMutex held
+  /// through finishPresetReplacement() and commit/rollback.
+  bool beginPresetReplacement(bool persistedState, PresetReplacementBackup& backup) {
     LayerMappingGuard guard(layerP.mappingMutex);
-    for (uint8_t i = 1; i < layerP.layers.size(); i++) {
-      if (!layerP.layers[i]) continue;
+    if (backup.valid || layerP.layers.size() > sizeof(backup.layers) / sizeof(backup.layers[0])) return false;
 
-      // destroy the VirtualLayer (destructor clears LEDs and deletes all nodes)
-      delete layerP.layers[i];
+    backup.layerSlots = layerP.layers.size();
+    backup.activeLayerCount = layerP.activeLayerCount;
+    backup.selectedLayer = selectedLayer;
+    backup.needsRestore = needsRestore;
+    backup.requestMapVirtual = layerP.requestMapVirtual;
+    for (size_t i = 0; i < backup.layerSlots; i++) {
+      backup.layers[i] = layerP.layers[i];
       layerP.layers[i] = nullptr;
-      if (layerP.activeLayerCount > 1) layerP.activeLayerCount--;
-
-      // clear per-layer JSON state so compareRecursive treats these keys as absent
-      layerStateClearKeys(state->data, i);
     }
-    // if the selected layer was > 0 (unlikely but safe), fall back to layer 0
-    if (selectedLayer > 0) {
-      selectLayer(0, false);
-      state->data["layer"] = 0;
-      // reload layer 0's nodes into state->data["nodes"]: selectLayer(false) skips the state swap,
-      // so without this compareRecursive would diff the new preset against the stale layer-N nodes.
-      // If they matched, it would skip node recreation even though the nodes were already destroyed.
-      layerStateLoad(state->data, 0);
-    }
+    backup.valid = true;
 
-    // reset layer 0's bounds to defaults in both the VirtualLayer and state, so that old-style
-    // presets that omit start/end/brightness get the defaults instead of stale values from the
-    // previous preset (compareRecursive skips absent keys, so we must pre-clear them)
-    if (layerP.layers[0]) {
-      layerP.layers[0]->startPct = {0, 0, 0};
-      layerP.layers[0]->endPct = {100, 100, 100};
-      layerP.layers[0]->brightness = 255;
-    }
-    state->data.remove("start");
-    state->data.remove("end");
-    state->data.remove("brightness");
-    // Clear the selected layer's canonical bounds as well. compareRecursive only visits keys
-    // present in the incoming preset, so retaining a previous preset's suffix would make an old
-    // bare field look canonical and defeat the needsRestore migration window below.
-    Char<16> selectedKey;
-    selectedKey.format("start_%d", selectedLayer); state->data.remove(selectedKey.c_str());
-    selectedKey.format("end_%d", selectedLayer); state->data.remove(selectedKey.c_str());
-    selectedKey.format("brightness_%d", selectedLayer); state->data.remove(selectedKey.c_str());
+    needsRestore = persistedState;
+    layerP.activeLayerCount = 0;
 
-    // schedule restore so non-selected layers from the new preset are rebuilt after readFromFS
-    needsRestore = true;
+    selectedLayer = 0;
+    VirtualLayer* layer0 = layerP.ensureLayer(0);
+    if (!layer0) {
+      rollbackPresetReplacement(backup);
+      return false;
+    }
+    *nodesPtr = &(layer0->nodes);
+
+    state->data.clear();
+    return true;
+  }
+
+  /// Rebuild only non-selected layers explicitly present in the incoming
+  /// document, then close the persisted-state migration window.
+  bool finishPresetReplacement(NodeManager& nm) {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    if (!restoreNonSelectedLayers(nm)) return false;
+    needsRestore = false;
+    layerP.requestMapVirtual = true;
+    *requestUIUpdatePtr = true;
+    return true;
+  }
+
+  void commitPresetReplacement(PresetReplacementBackup& backup) {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    if (!backup.valid) return;
+    // Physical driver/layout nodes survive preset replacement. Rebind them to
+    // the staged layer 0 before retiring the old topology they referenced.
+    layerP.rebindDriverNodes(layerP.layers[0]);
+    for (size_t i = 0; i < backup.layerSlots; i++) {
+      layerP.destroyLayer(backup.layers[i]);
+    }
+    backup.valid = false;
+  }
+
+  void rollbackPresetReplacement(PresetReplacementBackup& backup) {
+    LayerMappingGuard guard(layerP.mappingMutex);
+    if (!backup.valid) return;
+    // Keep surviving drivers valid while the staged topology is retired.
+    layerP.rebindDriverNodes(backup.layers[0]);
+    for (VirtualLayer*& layer : layerP.layers) {
+      layerP.destroyLayer(layer);
+    }
+    for (size_t i = 0; i < backup.layerSlots; i++) {
+      layerP.layers[i] = backup.layers[i];
+      backup.layers[i] = nullptr;
+    }
+    layerP.activeLayerCount = backup.activeLayerCount;
+    selectedLayer = backup.selectedLayer;
+    needsRestore = backup.needsRestore;
+    layerP.requestMapVirtual = backup.requestMapVirtual;
+    VirtualLayer* layer = selectedLayer < layerP.layers.size() ? layerP.layers[selectedLayer] : nullptr;
+    *nodesPtr = layer ? &(layer->nodes) : nullptr;
+    backup.valid = false;
   }
 
   /// Schedule restoration of non-selected layers. Call from begin() after NodeManager::begin().
@@ -173,8 +214,7 @@ class LayerManager {
     if (selectedLayer > 0 && layerP.layers[selectedLayer] && layerP.layers[selectedLayer]->nodes.empty()) {
       uint8_t destroyedLayer = selectedLayer;
       EXT_LOGD(ML_TAG, "Destroying empty VirtualLayer %d", destroyedLayer);
-      delete layerP.layers[destroyedLayer];
-      layerP.layers[destroyedLayer] = nullptr;
+      layerP.destroyLayer(layerP.layers[destroyedLayer]);
       layerP.activeLayerCount--;
       // clean up JSON state for the destroyed layer
       layerStateClearKeys(state->data, destroyedLayer);
@@ -315,7 +355,7 @@ class LayerManager {
 
  private:
   /// Instantiate nodes for non-selected layers and restore their per-layer bounds from JSON state.
-  void restoreNonSelectedLayers(NodeManager& nm) {
+  bool restoreNonSelectedLayers(NodeManager& nm) {
     LayerMappingGuard guard(layerP.mappingMutex);
     uint8_t savedSelectedLayer = selectedLayer;
     Char<16> key;
@@ -344,20 +384,19 @@ class LayerManager {
       if (layerNodes.isNull() || layerNodes.size() == 0) continue;
 
       VirtualLayer* layer = layerP.ensureLayer(i);
-      if (!layer) { EXT_LOGW(ML_TAG, "ensureLayer(%d) failed, skipping", i); continue; }
+      if (!layer) { EXT_LOGW(ML_TAG, "ensureLayer(%d) failed", i); return false; }
       selectedLayer = i;
       *nodesPtr = &(layer->nodes);
 
       for (uint8_t j = 0; j < layerNodes.size(); j++) {
         JsonObject nodeState = layerNodes[j];
-        if (nodeState["name"].isNull()) continue;
+        if (nodeState["name"].isNull()) return false;
         char name[32];
         strlcpy(name, nodeState["name"].as<const char*>(), 32);
         Node* node = nm.addNode(j, name, nodeState["controls"]);
-        if (node) {
-          node->on = nodeState["on"];
-          node->requestMappings();
-        }
+        if (!node) return false;
+        node->on = nodeState["on"];
+        node->requestMappings();
       }
 
       // restore per-layer bounds
@@ -385,6 +424,7 @@ class LayerManager {
 
 
     if (restoredAny) layerP.requestMapVirtual = true;
+    return true;
   }
 };
 

@@ -38,7 +38,6 @@ void NodeManager::begin() {
             if (equal(filesState.updatedItems[i].c_str(), name.c_str())) {
               EXT_LOGD(MB_TAG, " %s updated -> call update %s", name.c_str(), filesState.updatedItems[i].c_str());
               filesState.updatedItems.erase(filesState.updatedItems.begin() + i);  // consume the item so it doesn't trigger again
-              onBeforeStateLoad();                           // let subclass clear transient state (e.g. non-selected layers) before compareRecursive runs
               sharedFsPersistence->readFromFS(_moduleName);  // repopulates the state, processing file changes
             }
           }
@@ -104,12 +103,9 @@ void NodeManager::setupDefinition(const JsonArray& controls) {
 }
 
 void NodeManager::onUpdate(const UpdatedItem& updatedItem) {
-  // HTTP/WS must not wait forever for a mapping writer. 150ms then skip this update.
-  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(150));
-  if (!guard.ownsLock()) {
-    EXT_LOGW(MB_TAG, "mapping busy; skipped node update %s", updatedItem.name.c_str());
-    return;
-  }
+  // State is already committed before this callback. Wait for the mapping owner
+  // so the live graph cannot silently diverge from the persisted/UI state.
+  LayerMappingGuard guard(layerP.mappingMutex);
   // handle nodes
   if (updatedItem.parent[0] == "nodes") {  // onNodes
     JsonVariant nodeState = _state.data["nodes"][updatedItem.index[0]];
@@ -276,11 +272,7 @@ void NodeManager::handleNodeControlValueChange(const UpdatedItem& updatedItem, J
 }
 
 void NodeManager::onReOrderSwap(uint8_t stateIndex, uint8_t newIndex) {
-  LayerMappingGuard guard(layerP.mappingMutex, pdMS_TO_TICKS(150));
-  if (!guard.ownsLock()) {
-    EXT_LOGW(MB_TAG, "mapping busy; skipped reorder %u -> %u", stateIndex, newIndex);
-    return;
-  }
+  LayerMappingGuard guard(layerP.mappingMutex);
   EXT_LOGD(MB_TAG, "%d %d %d", nodes->size(), stateIndex, newIndex);
   // swap nodes
   Node* nodeS = (*nodes)[stateIndex];

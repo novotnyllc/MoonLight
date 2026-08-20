@@ -184,12 +184,17 @@ void FileManager::begin() {
   _server->on("/rest/saveConfig", HTTP_POST,
               _sveltekit->getSecurityManager()->wrapRequest(
                   [this](PsychicRequest* request) {
-                    request->reply(200);
-
-                    SharedFSPersistence::writeToFSDelayed('W');  // write all delayed writes to the FS
+                    if (safeModeMB) {
+                      request->reply(409, "text/plain", "Configuration save disabled in safe mode");
+                      return ESP_OK;
+                    }
+                    if (!SharedFSPersistence::writeToFSDelayed('W')) {
+                      request->reply(500, "text/plain", "Configuration save failed");
+                      return ESP_OK;
+                    }
 
                     saveNeeded = false;
-
+                    request->reply(200);
                     return ESP_OK;
                   },
                   AuthenticationPredicates::IS_AUTHENTICATED));
@@ -212,19 +217,27 @@ void FileManager::begin() {
   _server->on("/rest/saveGolden", HTTP_POST,
               _sveltekit->getSecurityManager()->wrapRequest(
                   [](PsychicRequest* request) {
+                    if (safeModeMB) {
+                      request->reply(409, "text/plain", "Configuration save disabled in safe mode");
+                      return ESP_OK;
+                    }
                     if (!goldenDmaReady()) {
                       request->reply(503, "text/plain", "Insufficient internal RAM for golden snapshot");
                       return ESP_OK;
                     }
-                    SharedFSPersistence::writeToFSDelayed('W');
+                    if (!SharedFSPersistence::writeToFSDelayed('W')) {
+                      request->reply(500, "text/plain", "Configuration save failed");
+                      return ESP_OK;
+                    }
                     if (!goldenSaveSnapshot()) {
                       request->reply(500, "text/plain", "Golden snapshot failed");
                       return ESP_OK;
                     }
+                    saveNeeded = false;
                     request->reply(200, "application/json", "{\"ok\":true,\"golden\":true}");
                     return ESP_OK;
                   },
-                  AuthenticationPredicates::IS_AUTHENTICATED));
+                  AuthenticationPredicates::IS_ADMIN));
 
   _server->on("/rest/restoreGolden", HTTP_POST,
               _sveltekit->getSecurityManager()->wrapRequest(
@@ -238,15 +251,18 @@ void FileManager::begin() {
                       return ESP_OK;
                     }
                     if (!goldenRestoreSnapshot()) {
-                      request->reply(500, "text/plain", "Golden restore failed");
+                      request->reply(500, "text/plain", "Golden restore failed; rebooting for filesystem recovery");
+                      delay(250);
+                      ESP.restart();
                       return ESP_OK;
                     }
-                    request->reply(200, "application/json", "{\"ok\":true,\"restart\":true}");
+                    request->reply(200, "application/json",
+                                   "{\"ok\":true,\"restart\":true,\"liveScripts\":\"disabled\"}");
                     delay(250);
                     ESP.restart();
                     return ESP_OK;
                   },
-                  AuthenticationPredicates::IS_AUTHENTICATED));
+                  AuthenticationPredicates::IS_ADMIN));
 }
 
 #endif

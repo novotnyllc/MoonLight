@@ -31,6 +31,8 @@ class LiveScriptNode : public Node {
   bool hasOnLayoutFunction = false;  ///< True if the script defines an onLayout() function
   bool needsCompile = false;         ///< True if compilation is deferred (another compile in progress)
   bool needsExecute = false;         ///< True after compile succeeds; picked up by loop20ms to call execute() after compile task exits
+  bool setupDeferred = false;        ///< True while a preset replacement stages this node without touching the shared runtime
+  bool runtimeLifecycleStarted = false;  ///< True after setup begins using the shared LiveScript runtime
 
   bool isLiveScriptNode() const override { return true; }
   bool hasModifier() const override { return hasModifyFunction; }
@@ -41,13 +43,18 @@ class LiveScriptNode : public Node {
   /// Registers external functions/variables with the LiveScript runtime, then compiles and runs the script.
   void setup() override;
 
+  /// Defers setup while a preset replacement is still rollbackable.
+  void deferSetup() { setupDeferred = true; }
+  /// Starts a setup deferred by preset replacement after the prior topology is retired.
+  void activateDeferredSetup();
+
   /// Signals the running script to continue its next animation frame via semaphore.
   void loop() override;
 
   /// Calls the script's onLayout() function if it exists, for layout mapping.
   void onLayout() override;
 
-  /// Kills the running script on destruction.
+  /// Quarantines the running script task on destruction without waiting on the vendor sync barrier.
   ~LiveScriptNode() override;
 
   /// Spawns a temporary task to compile the script (parser needs ~6KB stack).
@@ -63,8 +70,8 @@ class LiveScriptNode : public Node {
   void free();
   /// Kills the script and deletes its executable from the runtime.
   void killAndDelete();
-  /// Synchronously stops every registered loop task after a frame timeout.
-  /// Returns only after no timed-out node can schedule another frame.
+  /// Force-deletes registered loop tasks after a frame timeout without entering
+  /// ESPLiveScript's unbounded synchronization path; executable cleanup is deferred.
   static bool quiesceTimedOutTasks();
   /// Populates a JsonArray with info about all running LiveScript executables.
   static void getScriptsJson(JsonArray scripts);

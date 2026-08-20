@@ -13,18 +13,14 @@
  **/
 
 #include <ESP32SvelteKit.h>
-#include <DmaReserve.h>
 #include <MdnsRegistrationPolicy.h>
 #include <esp_heap_caps.h>
+#include <mdns.h>
 
 //🌙 added to telemetry
 bool safeModeMB = false; // 🌙 see .h
 bool restartNeeded = false; // 🌙 see .h
 bool saveNeeded = false; // 🌙 see.h
-
-#if FT_MOONBASE == 1
-bool moonbaseGoldenConfigPresent();
-#endif
 
 ESP32SvelteKit::ESP32SvelteKit(PsychicHttpServer *server, unsigned int numberEndpoints) : _server(server),
                                                                                           _numberEndpoints(numberEndpoints),
@@ -95,31 +91,18 @@ bool ESP32SvelteKit::begin()
     _ethernetSettingsService.initEthernet();
 #endif
 
-#if FT_ENABLED(FT_WIFI) // 🌙
-    if (!_mdnsLifecycleHooksRegistered)
+#if FT_ENABLED(FT_WIFI) || FT_ENABLED(FT_ETHERNET)
+    // Allocate the responder while internal RAM is still contiguous. Espressif's
+    // component owns network/IP lifecycle events and enables it when an interface gets an address.
+    if (!Network.begin())
     {
-        _mdnsLifecycleHooksRegistered = true;
-        WiFi.onEvent(
-            [this](WiFiEvent_t event, WiFiEventInfo_t) {
-                switch (event)
-                {
-                case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-                    stopMdns();
-                    _lastMdnsMaintain = 0;
-                    _mdnsAnnounceFailures = 0;
-                    break;
-                case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-                    _lastMdnsMaintain = 0;
-                    if (!_mdnsStarted)
-                        startMdns();
-                    else
-                        announceMdnsSta();
-                    break;
-                default:
-                    break;
-                }
-            });
+        ESP_LOGE(SVK_TAG, "Network event loop failed to start");
+        return false;
     }
+    startMdns();
+#endif
+
+#if FT_ENABLED(FT_WIFI) // 🌙
     _wifiSettingsService.initWiFi();
 #endif
 
@@ -136,6 +119,10 @@ bool ESP32SvelteKit::begin()
         {
             PsychicHttpRequestCallback requestHandler = [contentType, content, len, contentEncoding](PsychicRequest *request)
             {
+                const String &requestUri = request->uri();
+                if (requestUri == "/rest" || requestUri.startsWith("/rest?") || requestUri.startsWith("/rest/"))
+                    return request->reply(404);
+
                 PsychicResponse response(request);
                 response.setCode(200);
                 response.setContentType(contentType.c_str());
@@ -144,30 +131,10 @@ bool ESP32SvelteKit::begin()
                 }
                 response.addHeader("Cache-Control", "no-cache"); // 🌙 modified after a user got annoyed ;-)
                 // response.addHeader("Cache-Control", "public, immutable, max-age=31536000"); // 🌙 this is original
-                size_t chunkSize = 4096;
-                uint8_t *chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
-                if (!chunk) {
-                    chunkSize = 1024;
-                    chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
-                }
-                if (!chunk) {
-                    chunkSize = 256;
-                    chunk = static_cast<uint8_t *>(PsychicResponse::allocateResponseBuffer(chunkSize));
-                }
-                if (!chunk) return PsychicResponse::sendServiceUnavailable(request);
-                response.sendHeaders();
-                for (size_t offset = 0; offset < len; offset += chunkSize)
-                {
-                    size_t size = len - offset < chunkSize ? len - offset : chunkSize;
-                    memcpy(chunk, content + offset, size);
-                    esp_err_t err = response.sendChunk(chunk, size);
-                    if (err != ESP_OK) {
-                        heap_caps_free(chunk);
-                        return err;
-                    }
-                }
-                heap_caps_free(chunk);
-                return response.finishChunking();
+                // Embedded assets live in flash; send one response so one client
+                // cannot monopolize the serialized httpd task per chunk.
+                response.setContent(content, len);
+      return response.send();
             };
             PsychicWebHandler *handler = new PsychicWebHandler();
             handler->onRequest(requestHandler);
@@ -225,7 +192,6 @@ bool ESP32SvelteKit::begin()
     _wifiSettingsService.begin();
     _wifiScanner.begin();
     _wifiStatus.begin();
-    ensureMdns();
 #endif
     _socket.registerEvent("status"); // 🌙 system status event (saveNeeded, restartNeeded, safeMode, hostName)
 #if FT_ENABLED(FT_ETHERNET)
@@ -308,129 +274,100 @@ bool ESP32SvelteKit::startMdns()
     if (_mdnsStarted)
         return true;
 
-    if (!WiFi.isConnected())
-        return false;
-
-    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (largestInternal < 1024)
-    {
-        ESP_LOGW(SVK_TAG, "mDNS defer start: largest internal=%u", (unsigned)largestInternal);
-        return false;
-    }
-
     String mdnsHostname = getSystemHostname();
     mdnsHostname.toLowerCase();
     if (!MDNS.begin(mdnsHostname.c_str()))
     {
+        const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         ESP_LOGE(SVK_TAG, "mDNS failed to start for %s (largest internal=%u)", mdnsHostname.c_str(),
                  (unsigned)largestInternal);
         return false;
     }
 
-    MDNS.setInstanceName(mdnsHostname);
-    MDNS.addService("http", "tcp", 80);
+    MDNS.setInstanceName(_appName.length() ? _appName : mdnsHostname);
+    _mdnsHttpServiceApiOk = MDNS.addService("http", "tcp", 80);
     MDNS.addService("ws", "tcp", 80);
-    MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+    if (_mdnsHttpServiceApiOk)
+        MDNS.addServiceTxt("http", "tcp", "Firmware Version", APP_VERSION);
+    else
+        ESP_LOGW(SVK_TAG, "mDNS responder started without a registered HTTP service");
+    _mdnsAdvertisedHostname = mdnsHostname;
     _mdnsStarted = true;
-    _lastMdnsAnnounceOk = 0;
-    _mdnsAnnounceFailures = 0;
-    if (!announceMdnsSta()) {
-      _mdnsAnnounceFailures++;
-      ESP_LOGW(SVK_TAG, "mDNS started but initial announce failed for %s", mdnsHostname.c_str());
-    }
+    _lastMdnsMaintain = millis();
     ESP_LOGI(SVK_TAG, "mDNS started: http://%s.local", mdnsHostname.c_str());
     return true;
 }
 
-void ESP32SvelteKit::stopMdns()
-{
-    if (!_mdnsStarted)
-        return;
-    MDNS.end();
-    _mdnsStarted = false;
-    _lastMdnsAnnounceOk = 0;
-    _mdnsAnnounceFailures = 0;
-}
-
-bool ESP32SvelteKit::restartMdns()
-{
-    stopMdns();
-    return startMdns();
-}
-
-bool ESP32SvelteKit::announceMdnsSta()
-{
-    esp_netif_t *netif = WiFi.STA.netif();
-    if (!netif)
-        return false;
-    esp_err_t enable = mdns_netif_action(netif, MDNS_EVENT_ENABLE_IP4);
-    esp_err_t announce = mdns_netif_action(netif, MDNS_EVENT_ANNOUNCE_IP4);
-    if (mdnsAnnounceSucceeded((int)enable, (int)announce))
-    {
-        _lastMdnsAnnounceOk = millis();
-        return true;
-    }
-    return false;
-}
-
-void ESP32SvelteKit::ensureMdns()
-{
-    if (!WiFi.isConnected())
-        return;
-
-    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (mdnsShouldStart(_mdnsStarted, false, true, largestInternal, 1024))
-        startMdns();
-}
-
+#if FT_ENABLED(FT_WIFI)
 void ESP32SvelteKit::maintainMdns()
 {
-    if (!WiFi.isConnected())
-        return;
-
+    const bool wifiConnected = WiFi.isConnected();
     const uint32_t now = millis();
-    constexpr uint32_t kHealthyInterval = 60000UL;
-    constexpr uint32_t kRecoveryInterval = 15000UL;
-    constexpr uint32_t kStaleMs = 90000UL;
-    constexpr uint8_t kMaxAnnounceFailures = 3;
-    constexpr size_t kAnnounceMinInternal = 2048;
-    const uint32_t interval = mdnsMaintainIntervalMs(_mdnsStarted, now, _lastMdnsAnnounceOk, kHealthyInterval,
-                                                     kRecoveryInterval, kStaleMs);
-    if (_lastMdnsMaintain && (uint32_t)(now - _lastMdnsMaintain) < interval)
-        return;
-    _lastMdnsMaintain = now;
+    const MdnsMaintainDecision decision = mdnsMaintainTransition(
+        {_mdnsSawConnected, _mdnsAnnounceAttempts, _lastMdnsMaintain, _mdnsHttpServiceApiOk},
+        wifiConnected, _mdnsStarted, now);
+    _mdnsSawConnected = decision.state.sawConnected;
+    _mdnsAnnounceAttempts = decision.state.announceAttempts;
+    _lastMdnsMaintain = decision.state.lastMaintain;
+    _mdnsHttpServiceApiOk = decision.state.httpServiceApiOk;
 
-    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (_mdnsAnnounceFailures >= kMaxAnnounceFailures ||
-        mdnsShouldRestart(_mdnsStarted, false, true, largestInternal, now, _lastMdnsAnnounceOk, kStaleMs, 2048))
+    switch (decision.action)
     {
-        ESP_LOGW(SVK_TAG, "mDNS stale/failed, restarting (largest internal=%u, fails=%u)", (unsigned)largestInternal,
-                  (unsigned)_mdnsAnnounceFailures);
-        restartMdns();
+    case MdnsMaintainAction::None:
+        return;
+    case MdnsMaintainAction::CheckStart:
+    {
+        constexpr size_t kStartMinInternal = 6144;
+        const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (largestInternal >= kStartMinInternal)
+            startMdns();
+        return;
+    }
+    default:
+        break;
+    }
+
+    // Hostname changes are rare; check once per announce burst, not on every
+    // 20 ms framework iteration.
+    if (decision.checkHostname)
+    {
+        String currentHostname = getSystemHostname();
+        currentHostname.toLowerCase();
+        if (currentHostname != _mdnsAdvertisedHostname && mdns_hostname_set(currentHostname.c_str()) == ESP_OK)
+        {
+            MDNS.setInstanceName(_appName.length() ? _appName : currentHostname);
+            _mdnsAdvertisedHostname = currentHostname;
+        }
+    }
+
+    if (decision.action == MdnsMaintainAction::RefreshHttpService)
+    {
+        const esp_err_t result = mdns_service_port_set("_http", "_tcp", 80);
+        const MdnsMaintainState complete = mdnsHttpRefreshResult(decision.state, now, result == ESP_OK);
+        _lastMdnsMaintain = complete.lastMaintain;
+        _mdnsHttpServiceApiOk = complete.httpServiceApiOk;
+        if (result != ESP_OK)
+            ESP_LOGW(SVK_TAG, "mDNS HTTP service refresh failed: %s", esp_err_to_name(result));
         return;
     }
 
-    if (mdnsShouldStart(_mdnsStarted, false, true, largestInternal, 1024))
+    esp_netif_t *netif = WiFi.STA.netif();
+    if (!netif)
     {
-        startMdns();
+        _lastMdnsMaintain = mdnsMaintainRetryLater(decision.state, now).lastMaintain;
         return;
     }
+    const esp_err_t result =
+        mdns_netif_action(netif, static_cast<mdns_event_actions_t>(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4));
 
-    if (!mdnsShouldAnnounce(_mdnsStarted, false, true, largestInternal, kAnnounceMinInternal))
-    {
-        if (_mdnsStarted && _lastMdnsAnnounceOk != 0)
-            _lastMdnsAnnounceOk = 0;
-        return;
-    }
-
-    if (!announceMdnsSta())
-    {
-        _mdnsAnnounceFailures++;
-        _lastMdnsAnnounceOk = 0;
-    }
-    else
-        _mdnsAnnounceFailures = 0;
+    const MdnsMaintainState complete = mdnsMaintainComplete(decision.state, now, result == ESP_OK);
+    _mdnsSawConnected = complete.sawConnected;
+    _mdnsAnnounceAttempts = complete.announceAttempts;
+    _lastMdnsMaintain = complete.lastMaintain;
+    if (result != ESP_OK)
+        ESP_LOGW(SVK_TAG, "mDNS interface recovery call failed: %s", esp_err_to_name(result));
 }
+#endif
 
 void ESP32SvelteKit::_loop()
 {
@@ -450,13 +387,6 @@ void ESP32SvelteKit::_loop()
         wifi_eth_combined = false;
 #if FT_ENABLED(FT_WIFI) // 🌙
         _wifiSettingsService.loop(); // 30 seconds
-        if (dmaReserve::check(millis())) {
-            _lastMdnsMaintain = 0;
-            if (_mdnsStarted)
-                restartMdns();
-            else
-                startMdns();
-        }
         maintainMdns();
         _apSettingsService.loop();   // 10 seconds
 #endif
@@ -519,9 +449,7 @@ void ESP32SvelteKit::_loop()
                 doc["restartNeeded"] = restartNeeded;
                 doc["saveNeeded"] = saveNeeded;
                 doc["hostName"] = getSystemHostname();
-#if FT_MOONBASE == 1
-                doc["goldenPresent"] = moonbaseGoldenConfigPresent();
-#endif
+                if (_statusAppender) _statusAppender(doc.as<JsonObject>());
                 JsonObject jsonObject = doc.as<JsonObject>();
                 _socket.emitEvent("status", jsonObject);
             }

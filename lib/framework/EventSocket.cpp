@@ -1,5 +1,7 @@
 #include <EventSocket.h>
 
+#include <array>
+
 SemaphoreHandle_t clientSubscriptionsMutex = xSemaphoreCreateMutex();
 SemaphoreHandle_t eventSerializationMutex = xSemaphoreCreateMutex();
 
@@ -89,10 +91,16 @@ esp_err_t EventSocket::onFrame(PsychicWebSocketRequest *request, httpd_ws_frame 
                 // only subscribe to events that are registered
                 if (isEventValid(doc["data"].as<String>()))
                 {
+                    const String subscribedEvent = doc["data"].as<String>();
+                    const int socket = request->client()->socket();
                     xSemaphoreTake(clientSubscriptionsMutex, portMAX_DELAY);
-                    client_subscriptions[doc["data"]].push_back(request->client()->socket());
+                    auto &subscriptions = client_subscriptions[subscribedEvent];
+                    if (std::find(subscriptions.begin(), subscriptions.end(), socket) == subscriptions.end())
+                    {
+                        subscriptions.push_back(socket);
+                    }
                     xSemaphoreGive(clientSubscriptionsMutex);
-                    handleSubscribeCallbacks(doc["data"], String(request->client()->socket()));
+                    handleSubscribeCallbacks(subscribedEvent, String(socket));
                 }
                 else
                 {
@@ -169,57 +177,64 @@ void EventSocket::emitEvent(const String& event, const char *output, size_t len,
     }
 
     int originSubscriptionId = originId[0] ? atoi(originId) : -1;
+    const bool sendOnlyToOrigin = onlyToSameOrigin && originSubscriptionId > 0;
+    std::array<int, CONFIG_LWIP_MAX_SOCKETS> recipients{};
+    size_t recipientCount = 0;
+
     xSemaphoreTake(clientSubscriptionsMutex, portMAX_DELAY);
-    auto &subscriptions = client_subscriptions[event];
-    if (subscriptions.empty())
+    auto subscriptions = client_subscriptions.find(event);
+    if (subscriptions == client_subscriptions.end() || subscriptions->second.empty())
     {
         xSemaphoreGive(clientSubscriptionsMutex);
         return;
     }
 
-    // if onlyToSameOrigin == true, send the message back to the origin
-    if (onlyToSameOrigin && originSubscriptionId > 0)
+    if (sendOnlyToOrigin)
     {
+        recipients[recipientCount++] = originSubscriptionId;
+    }
+    else
+    {
+        for (int subscription : subscriptions->second)
+        {
+            if (subscription == originSubscriptionId ||
+                std::find(recipients.begin(), recipients.begin() + recipientCount, subscription) != recipients.begin() + recipientCount)
+            {
+                continue;
+            }
+            if (recipientCount == recipients.size())
+            {
+                ESP_LOGW(SVK_TAG, "Recipient snapshot full for event %s", event.c_str());
+                break;
+            }
+            recipients[recipientCount++] = subscription;
+        }
+    }
+    xSemaphoreGive(clientSubscriptionsMutex);
+
+    for (size_t i = 0; i < recipientCount; ++i)
+    {
+        const int subscription = recipients[i];
 #if FT_ENABLED(EVENT_USE_JSON)
-        esp_err_t result = _socket.sendTo(originSubscriptionId, HTTPD_WS_TYPE_TEXT, output, len);
+        esp_err_t result = _socket.sendTo(subscription, HTTPD_WS_TYPE_TEXT, output, len);
 #else
-        esp_err_t result = _socket.sendTo(originSubscriptionId, HTTPD_WS_TYPE_BINARY, output, len);
+        esp_err_t result = _socket.sendTo(subscription, HTTPD_WS_TYPE_BINARY, output, len);
 #endif
         if (result != ESP_OK)
         {
-            ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %d: %s (len: %zu)", event.c_str(), originId, originSubscriptionId, esp_err_to_name(result), len);
+            ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %d: %s (len: %zu)", event.c_str(), originId, subscription, esp_err_to_name(result), len);
+            if (!sendOnlyToOrigin)
+            {
+                xSemaphoreTake(clientSubscriptionsMutex, portMAX_DELAY);
+                auto currentSubscriptions = client_subscriptions.find(event);
+                if (currentSubscriptions != client_subscriptions.end())
+                {
+                    currentSubscriptions->second.remove(subscription);
+                }
+                xSemaphoreGive(clientSubscriptionsMutex);
+            }
         }
     }
-    else
-    { // else send the message to all other clients
-
-        // 🌙 use iterator so remove / erase also removes from the iterator
-        for (auto it = subscriptions.begin(); it != subscriptions.end();)
-        {
-            int subscription = *it;
-            if (subscription == originSubscriptionId)
-            {
-                ++it;
-                continue;
-            }
-#if FT_ENABLED(EVENT_USE_JSON)
-            esp_err_t result = _socket.sendTo(subscription, HTTPD_WS_TYPE_TEXT, output, len);
-#else
-            esp_err_t result = _socket.sendTo(subscription, HTTPD_WS_TYPE_BINARY, output, len);
-#endif
-            // 🌙 error check
-            if (result != ESP_OK)
-            {
-                ESP_LOGW(SVK_TAG, "Failed to send event %s from %s to client %u: %s (len: %zu)", event.c_str(), originId, subscription, esp_err_to_name(result), len);
-                // it = subscriptions.erase(it);// do not erase as we hope for better times
-                it = subscriptions.erase(it);  // remove dead client; don't keep retrying
-                continue;
-            }
-            ++it;
-        }
-    }
-
-    xSemaphoreGive(clientSubscriptionsMutex);
 }
 
 void EventSocket::handleEventCallbacks(String event, JsonObject &jsonObject, int originId)

@@ -13,6 +13,7 @@
 	import UpdateIndicator from '$lib/components/UpdateIndicator.svelte';
 	import logo from '$lib/assets/logo.png';
 	import PlugConnected from '~icons/tabler/plug-connected';
+	import { notifications } from '$lib/components/toasts/notifications';
 
 	async function postSleep() {
 		const response = await fetch('/rest/sleep', {
@@ -69,23 +70,39 @@
 	}
 
 	async function postSaveGolden() {
-		const response = await fetch('/rest/saveGolden', {
-			method: 'POST',
-			headers: {
-				Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic'
+		try {
+			const response = await fetch('/rest/saveGolden', {
+				method: 'POST',
+				headers: {
+					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic'
+				}
+			});
+			if (!response.ok) {
+				notifications.error((await response.text()) || 'Golden configuration save failed.', 5000);
+				return;
 			}
-		});
-		return response.ok;
+			notifications.success('Golden configuration saved.', 3000);
+		} catch {
+			notifications.error('Golden configuration save failed.', 5000);
+		}
 	}
 
 	async function postRestoreGolden() {
-		const response = await fetch('/rest/restoreGolden', {
-			method: 'POST',
-			headers: {
-				Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic'
+		try {
+			const response = await fetch('/rest/restoreGolden', {
+				method: 'POST',
+				headers: {
+					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic'
+				}
+			});
+			if (!response.ok) {
+				notifications.error((await response.text()) || 'Golden configuration restore failed.', 5000);
+				return;
 			}
-		});
-		return response.ok;
+				notifications.success('Golden configuration restored. LiveScripts disabled; restarting…', 3000);
+		} catch {
+			notifications.error('Golden configuration restore failed.', 5000);
+		}
 	}
 
 	// 🌙 generic function!

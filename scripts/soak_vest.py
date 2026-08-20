@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP soak harness for Dig-Next-2 MoonLight vest stability checks."""
+"""REST-health soak harness for Dig-Next-2 MoonLight stability checks."""
 
 from __future__ import annotations
 
@@ -30,9 +30,10 @@ def fetch(url: str, method: str = "GET", timeout: float = 10.0, data: bytes | No
 
 def parse_status(body: str) -> dict:
     try:
-        return json.loads(body)
+        data = json.loads(body)
     except json.JSONDecodeError:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def parse_dma_kb(body: str) -> int | None:
@@ -52,14 +53,24 @@ def parse_dma_kb(body: str) -> int | None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Soak-test MoonLight vest over HTTP")
+    parser = argparse.ArgumentParser(description="Check MoonLight REST health over time")
     parser.add_argument("--host", default="192.168.20.239", help="Vest IP or hostname")
     parser.add_argument("--minutes", type=float, default=15.0, help="Soak duration")
     parser.add_argument("--quick", action="store_true", help="Run a 2-minute smoke soak")
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between cycles")
-    parser.add_argument("--min-dma-kb", type=int, default=2, help="Fail if DMA largest block drops below this")
+    parser.add_argument(
+        "--min-dma-kb",
+        type=int,
+        default=8,
+        help="REST-health diagnostic threshold for the largest DMA block (KB)",
+    )
     parser.add_argument("--bad-streak", type=int, default=3, help="Consecutive low-DMA cycles before fail")
-    parser.add_argument("--firmware", default="dignext2.104", help="Required firmware version substring")
+    parser.add_argument("--firmware", default="dignext2.139", help="Required firmware version substring")
+    parser.add_argument(
+        "--require-preset-apply",
+        action="store_true",
+        help="Require lightscontrol selected preset to change during this run",
+    )
     args = parser.parse_args()
     if args.quick:
         args.minutes = 2.0
@@ -71,9 +82,14 @@ def main() -> int:
     failures: list[str] = []
     low_dma_streak = 0
     last_uptime: int | None = None
-    last_preset_applies: int | None = None
+    first_selected: int | None = None
+    last_selected: int | None = None
+    observed_preset_apply = False
 
-    print(f"Soak {base} for {args.minutes} min, interval {args.interval}s, min DMA {args.min_dma_kb}KB")
+    print(
+        f"REST health {base} for {args.minutes} min, interval {args.interval}s, "
+        f"diagnostic min DMA {args.min_dma_kb}KB"
+    )
 
     while time.time() < end:
         cycle += 1
@@ -82,7 +98,6 @@ def main() -> int:
         dma = parse_dma_kb(body)
         uptime = data.get("uptime")
         firmware = data.get("firmware_version")
-        preset_applies = data.get("preset_applies")
 
         if status != 200:
             failures.append(f"cycle {cycle}: systemStatus HTTP {status} ({ms:.0f}ms)")
@@ -104,10 +119,18 @@ def main() -> int:
         if isinstance(uptime, int):
             last_uptime = uptime
 
-        if isinstance(preset_applies, int):
-            if last_preset_applies is not None and preset_applies < last_preset_applies:
-                failures.append(f"cycle {cycle}: preset_applies regressed ({last_preset_applies} -> {preset_applies})")
-            last_preset_applies = preset_applies
+        lights_status, lights_ms, lights_body = fetch(f"{base}/rest/lightscontrol", timeout=20)
+        lights_data = parse_status(lights_body)
+        selected = lights_data.get("preset", {}).get("selected") if isinstance(lights_data.get("preset"), dict) else None
+        if lights_status != 200:
+            failures.append(f"cycle {cycle}: /rest/lightscontrol HTTP {lights_status} ({lights_ms:.0f}ms)")
+
+        if isinstance(selected, int):
+            if first_selected is None:
+                first_selected = selected
+            if last_selected is not None and selected != last_selected:
+                observed_preset_apply = True
+            last_selected = selected
 
         for path in (
             "/moonbase/module?group=moonlight&module=lightscontrol",
@@ -120,7 +143,7 @@ def main() -> int:
             elif elapsed > 5000:
                 failures.append(f"cycle {cycle}: {path} slow {elapsed:.0f}ms")
 
-        # REST preset apply is intentionally disabled; must not wedge the device.
+        # Direct REST preset apply is intentionally disabled; this is only a REST-health check.
         payload = json.dumps({"preset": {"action": "click", "select": 1}}).encode()
         code, elapsed, _ = fetch(f"{base}/rest/lightscontrol", method="POST", data=payload, timeout=10)
         if code != 409:
@@ -128,20 +151,24 @@ def main() -> int:
 
         print(
             f"cycle {cycle}: status={status} dma={dma}KB uptime={uptime}s "
-            f"preset_applies={preset_applies} low_dma_streak={low_dma_streak} failures={len(failures)}"
+            f"selected={selected} low_dma_streak={low_dma_streak} failures={len(failures)}"
         )
 
         if failures:
             break
         time.sleep(args.interval)
 
+    if args.require_preset_apply and not observed_preset_apply:
+        failures.append("preset-apply gate requested but lightscontrol selected preset never changed")
+
     if failures:
-        print("SOAK FAIL")
+        print("REST HEALTH FAIL")
         for item in failures[:20]:
             print(f" - {item}")
         return 1
 
-    print(f"SOAK PASS ({cycle} cycles)")
+    gate = "preset-apply observed" if observed_preset_apply else "preset-apply not gated"
+    print(f"REST HEALTH PASS ({cycle} cycles; {gate})")
     return 0
 
 

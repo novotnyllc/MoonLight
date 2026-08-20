@@ -59,6 +59,10 @@
 		socket.close();
 	}
 
+	function handlePageShow(event: PageTransitionEvent) {
+		if (event.persisted) socket.reopen();
+	}
+
 	const addEventListeners = () => {
 		socket.on('open', handleOpen);
 		socket.on('close', handleClose);
@@ -72,6 +76,7 @@
 		if (page.data.features.ethernet) socket.on('ethernet', handleEthernet);
 		
 		window.addEventListener('pagehide', handlePageHide);
+		window.addEventListener('pageshow', handlePageShow);
 		document.addEventListener('visibilitychange', handleVisibilityChange); // 🌙 Listen to visibility changes
 	};
 
@@ -89,6 +94,7 @@
 
 		document.removeEventListener('visibilitychange', handleVisibilityChange); // 🌙 Clean up clientInfoListener listener and notify server
 		window.removeEventListener('pagehide', handlePageHide);
+		window.removeEventListener('pageshow', handlePageShow);
 	};
 
 	async function validateUser(userdata: userProfile) {

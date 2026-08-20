@@ -180,7 +180,7 @@ esp_err_t PsychicStaticFileHandler::handleRequest(PsychicRequest *request)
         // nope, send them the full file.
         else
         {
-            PsychicFileResponse response(request, _fs, _filename);
+            PsychicFileResponse response(request, _file, _filename);
 
             if (_last_modified.length())
                 response.addHeader("Last-Modified", _last_modified.c_str());
@@ -189,8 +189,6 @@ esp_err_t PsychicStaticFileHandler::handleRequest(PsychicRequest *request)
                 response.addHeader("Cache-Control", _cache_control.c_str());
                 response.addHeader("ETag", etag.c_str());
             }
-
-            _file.close();
 
             return response.send();
         }

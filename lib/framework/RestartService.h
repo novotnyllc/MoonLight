@@ -17,7 +17,6 @@
 
 #include <WiFi.h>
 
-#include <ESPmDNS.h>
 #include <PsychicHttp.h>
 #include <SecurityManager.h>
 
@@ -33,8 +32,6 @@ public:
     static void restartNow()
     {
         delay(250);
-        MDNS.end();
-        delay(100);
 #if FT_ENABLED(FT_WIFI) // 🌙 skip on boards without WiFi (e.g. ESP32-P4-ETH) — avoids ESP-Hosted crash
         WiFi.disconnect(true);
         delay(200);

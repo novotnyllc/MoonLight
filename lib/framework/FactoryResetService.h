@@ -21,6 +21,7 @@
 #include <SecurityManager.h>
 #include <RestartService.h>
 #include <FS.h>
+#include <functional>
 
 #define FS_CONFIG_DIRECTORY "/.config" // 🌙 use /.config (hidden folder)
 #define FACTORY_RESET_SERVICE_PATH "/rest/factoryReset"
@@ -34,10 +35,13 @@ public:
 
     void begin();
     void factoryReset();
+    void setResetHook(std::function<bool()> hook) { _resetHook = std::move(hook); }
 
 private:
     PsychicHttpServer *_server;
     SecurityManager *_securityManager;
+    std::function<bool()> _resetHook;
+    bool clearStorage();
     esp_err_t handleRequest(PsychicRequest *request);
 };
 

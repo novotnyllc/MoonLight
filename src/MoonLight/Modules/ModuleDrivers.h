@@ -104,6 +104,8 @@ class ModuleDrivers : public NodeManager {
     NodeManager::begin();
   }
 
+  bool shouldLoadPersistedState() const override { return !safeModeMB; }
+
   void addNodes(const JsonObject& control) override {
     // Layouts, Most used first
     addNodeValue<PanelLayout>(control);

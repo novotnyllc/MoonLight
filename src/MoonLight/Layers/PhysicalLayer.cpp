@@ -26,17 +26,16 @@ PhysicalLayer layerP;  // global singleton of the physical layer
 PhysicalLayer::PhysicalLayer() : ledPins{}, ledPinsAssigned{}, ledsPerPin{} {
   EXT_LOGD(ML_TAG, "constructor");
 
-  // pre-allocate 16 layer slots (nullptr = not yet created, allocated on demand)
-  layers.resize(16, nullptr);
-  // layer 0 always exists
-  layers[0] = new VirtualLayer();
-  layers[0]->layerP = this;
+  // Keep the fixed layer table in the object; allocate VirtualLayer objects only
+  // after startup so their sizeable internal vectors prefer PSRAM.
+  layers.fill(nullptr);
 
   if (effectsMutex == nullptr) EXT_LOGE(ML_TAG, "Failed to create effectsMutex");
   if (driversMutex == nullptr) EXT_LOGE(ML_TAG, "Failed to create driversMutex");
 }
 
 PhysicalLayer::~PhysicalLayer() {
+  for (VirtualLayer*& layer : layers) destroyLayer(layer);
   if (effectsMutex) {
     vSemaphoreDelete(effectsMutex);
     effectsMutex = NULL;
@@ -47,13 +46,31 @@ PhysicalLayer::~PhysicalLayer() {
   }
 }
 
+void PhysicalLayer::destroyLayer(VirtualLayer*& layer) {
+  freeMBObject(layer);
+}
+
+void PhysicalLayer::rebindDriverNodes(VirtualLayer* layer) {
+  if (!driversMutex) return;
+  xSemaphoreTake(driversMutex, portMAX_DELAY);
+  for (Node* node : nodes) {
+    if (node) node->layer = layer;
+  }
+  xSemaphoreGive(driversMutex);
+}
+
 VirtualLayer* PhysicalLayer::ensureLayer(uint8_t index) {
   LayerMappingGuard guard(mappingMutex);
   if (index >= layers.size()) return nullptr;
   if (!layers[index]) {
-    layers[index] = new VirtualLayer();
-    layers[index]->layerP = this;
-    layers[index]->setup();
+    VirtualLayer* layer = allocMBObject<VirtualLayer>();
+    if (!layer) {
+      EXT_LOGE(ML_TAG, "Failed to allocate VirtualLayer %d", index);
+      return nullptr;
+    }
+    layer->layerP = this;
+    layer->setup();
+    layers[index] = layer;
     activeLayerCount++;
     EXT_LOGD(ML_TAG, "Created VirtualLayer %d on demand (active: %d)", index, activeLayerCount);
   }

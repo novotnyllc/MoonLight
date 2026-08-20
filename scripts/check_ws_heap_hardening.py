@@ -1,6 +1,11 @@
 from pathlib import Path
 
 
+def require(condition: bool, message: str = "invariant failed") -> None:
+    if not condition:
+        raise SystemExit(f"hardening check failed: {message}")
+
+
 source = (Path(__file__).parents[1] / "src/MoonBase/SharedWebSocketServer.h").read_text()
 shared_event_source = (Path(__file__).parents[1] / "src/MoonBase/SharedEventEndpoint.h").read_text()
 request_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicRequest.cpp").read_text()
@@ -9,6 +14,7 @@ response_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicRespo
 stream_response_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicStreamResponse.cpp").read_text()
 websocket_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicWebSocket.cpp").read_text()
 server_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicHttpServer.cpp").read_text()
+static_file_source = (Path(__file__).parents[1] / "lib/PsychicHttp/src/PsychicStaticFileHander.cpp").read_text()
 wifi_source = (Path(__file__).parents[1] / "lib/framework/WiFiSettingsService.cpp").read_text()
 pico_config = (Path(__file__).parents[1] / "firmware/esp32-d0.ini").read_text()
 wifi_buffer_config = (Path(__file__).parents[1] / "lib/framework/WiFiStaticBuffers.h").read_text()
@@ -21,98 +27,163 @@ file_manager_source = (Path(__file__).parents[1] / "src/MoonBase/Modules/FileMan
 sveltekit_source = (Path(__file__).parents[1] / "lib/framework/ESP32SvelteKit.cpp").read_text()
 system_status_header = (Path(__file__).parents[1] / "lib/framework/SystemStatus.h").read_text()
 system_status_source = (Path(__file__).parents[1] / "lib/framework/SystemStatus.cpp").read_text()
+main_source = (Path(__file__).parents[1] / "src/main.cpp").read_text()
 lights_control_source = (Path(__file__).parents[1] / "src/MoonLight/Modules/ModuleLightsControl.h").read_text()
+preset_controller_source = (Path(__file__).parents[1] / "src/MoonLight/Modules/ModuleLightsControlPresets.h").read_text()
+physical_layer_header = (Path(__file__).parents[1] / "src/MoonLight/Layers/PhysicalLayer.h").read_text()
+physical_layer_source = (Path(__file__).parents[1] / "src/MoonLight/Layers/PhysicalLayer.cpp").read_text()
+layer_manager_source = (Path(__file__).parents[1] / "src/MoonLight/Layers/LayerManager.h").read_text()
+module_effects_source = (Path(__file__).parents[1] / "src/MoonLight/Modules/ModuleEffects.h").read_text()
 allocator = "JsonDocument doc(PsychicJsonAllocator::instance());"
 no_clients = "if (!client && _handler.count() == 0) return;"
 event_guard = "if (!sync && !_socket->hasBroadcastRecipient(_event, originId)) return;"
 websocket_guard = "if (!client && _webSocket.count() == 0) return;"
 
-assert allocator in source, "WebSocket snapshots must allocate JSON in PSRAM"
-assert "JsonDocument jsonBuffer(PsychicJsonAllocator::instance());" in json_source, "JSON request bodies must prefer PSRAM"
-assert "JsonDocument doc(PsychicJsonAllocator::instance());" in event_socket_source, "Incoming event JSON must prefer PSRAM"
-assert "PsychicJsonAllocator::instance()->allocate(outputSize)" in event_socket_source, "Event payloads must prefer PSRAM"
-assert "static std::vector<uint8_t> outBuffer" not in event_socket_source, "Event payload capacity must not remain in internal RAM"
-assert "heap_caps_malloc_prefer(size, 2," in response_source, "Response buffers must prefer PSRAM"
-for response_user in (json_source, stream_response_source, sveltekit_source):
-    assert "allocateResponseBuffer(" in response_user
-assert allocator in shared_event_source, "Event snapshots must allocate JSON in PSRAM"
+require(allocator in source, "WebSocket snapshots must allocate JSON in PSRAM")
+require("JsonDocument jsonBuffer(PsychicJsonAllocator::instance());" in json_source, "JSON request bodies must prefer PSRAM")
+require("JsonDocument doc(PsychicJsonAllocator::instance());" in event_socket_source, "Incoming event JSON must prefer PSRAM")
+require("PsychicJsonAllocator::instance()->allocate(outputSize)" in event_socket_source, "Event payloads must prefer PSRAM")
+require("static std::vector<uint8_t> outBuffer" not in event_socket_source, "Event payload capacity must not remain in internal RAM")
+require("heap_caps_malloc_prefer(size, 2," in response_source, "Response buffers must prefer PSRAM")
+for response_user in (json_source, stream_response_source):
+    require("allocateResponseBuffer(" in response_user)
+embed_start = sveltekit_source.index("#ifdef EMBED_WWW")
+embed_end = sveltekit_source.index("#else", embed_start)
+embedded_static_source = sveltekit_source[embed_start:embed_end]
+require("response.setContent(content, len);" in embedded_static_source, "Embedded assets must use one-shot responses")
+require("return response.send();" in embedded_static_source, "Embedded one-shot responses must actually be sent")
+callback_start = embedded_static_source.index("PsychicHttpRequestCallback requestHandler")
+callback_end = embedded_static_source.index("PsychicResponse response(request);", callback_start)
+fallback_guard = embedded_static_source[callback_start:callback_end]
+require('requestUri == "/rest"' in fallback_guard and 'requestUri.startsWith("/rest?")' in fallback_guard and 'requestUri.startsWith("/rest/")' in fallback_guard, "The entire REST namespace must not fall through to the SPA")
+require(fallback_guard.index('requestUri == "/rest"') < fallback_guard.index("return request->reply(404);"), "Missing REST resources must return not-found before the SPA response")
+require('httpd_resp_set_hdr(request->request(), "Connection", "close");' not in json_source, "JSON REST sessions must reuse connections instead of churning TCP state")
+require('httpd_resp_set_hdr(request->request(), "Connection", "close");' not in embedded_static_source, "Embedded static responses must reuse connections instead of churning TCP state")
+require('response.addHeader("Connection", "close");' not in embedded_static_source, "Static assets must not allocate a close header")
+require("response.sendChunk" not in embedded_static_source, "Embedded assets must not serialize a chunk loop on httpd")
+require("config.send_wait_timeout" not in server_source, "HTTP sends must retain the ESP-IDF timeout default")
+require("PsychicFileResponse response(request, _file, _filename);" in static_file_source, "Static files must reuse the handle opened during route matching")
+file_response_branch = static_file_source.split("PsychicFileResponse response(request, _file, _filename);", 1)[1].split("return response.send();", 1)[0]
+require("_file.close();" not in file_response_branch, "The shared File handle must remain open until the synchronous response send completes")
+require(allocator in shared_event_source, "Event snapshots must allocate JSON in PSRAM")
 shared_event_guard = "if (!sync && !_socket->hasBroadcastRecipient(module->_moduleName, originId)) return;"
-assert shared_event_guard in shared_event_source
-assert shared_event_source.index(shared_event_guard) < shared_event_source.index("module->read")
-assert no_clients in source, "WebSocket broadcasts must skip serialization with no clients"
-assert source.index(no_clients) < source.index("String buffer;", source.index("void transmitData"))
-assert "if (request->client()->isNew)" in source, "Initial state must follow the connection, not a reused fd"
-assert "(*this->_session)[key] = value;" in request_source, "Session values must be replaceable on reconnect"
-assert "PsychicHandler::getClient(request->client())" in websocket_source
-assert "checkForNewClient(request->client())" not in websocket_source, "The first data frame must not clear isNew"
-assert "isNew = client->isNew;" in websocket_source
-assert "client->isNew = wsRequest.client()->isNew;" in websocket_source
-assert "config.lru_purge_enable = true;" in server_source
-assert ".handle_ws_control_frames" not in server_source, "ESP-IDF must own WebSocket control frames"
-assert "WebSocket send failed for fd=%d" in websocket_source
-assert "HTTPD_WS_TYPE_CLOSE" not in websocket_source, "ESP-IDF must own WebSocket close frames"
-assert "HTTPD_WS_TYPE_PING" not in websocket_source, "ESP-IDF must own WebSocket ping frames"
-assert "TCP_NODELAY" not in server_source, "HTTP and WebSocket sockets must use the supported TCP defaults"
-assert "#ifdef WIFI_USE_STATIC_BUFFERS\n    WiFi.useStaticBuffers(true);\n#endif" in wifi_source
-assert wifi_source.index("WiFi.useStaticBuffers(true);") < wifi_source.index("WiFi.mode(WIFI_MODE_STA)")
+require(shared_event_guard in shared_event_source)
+require(shared_event_source.index(shared_event_guard) < shared_event_source.index("module->read"))
+require(no_clients in source, "WebSocket broadcasts must skip serialization with no clients")
+require(source.index(no_clients) < source.index("String buffer;", source.index("void transmitData")))
+require("if (request->client()->isNew)" in source, "Initial state must follow the connection, not a reused fd")
+require("(*this->_session)[key] = value;" in request_source, "Session values must be replaceable on reconnect")
+require("PsychicHandler::getClient(request->client())" in websocket_source)
+require("checkForNewClient(request->client())" not in websocket_source, "The first data frame must not clear isNew")
+require("isNew = client->isNew;" in websocket_source)
+require("client->isNew = wsRequest.client()->isNew;" in websocket_source)
+require("config.lru_purge_enable = true;" in server_source)
+require(".handle_ws_control_frames" not in server_source, "ESP-IDF must own WebSocket control frames")
+require("httpd_queue_work" in websocket_source, "Non-request WebSocket sends must run on the HTTPD queue")
+require("QueuedWebSocketFrame" in websocket_source and "memcpy(queued->frame.payload" in websocket_source,
+        "Queued WebSocket payloads must remain owned until send completion")
+require("httpd_ws_get_fd_info(queued->server, queued->socket)" in websocket_source,
+        "Queued sends must revalidate the socket on the HTTPD task")
+client_send = websocket_source.split("esp_err_t PsychicWebSocketClient::sendMessage(httpd_ws_frame_t * ws_pkt)", 1)[1].split(
+    "esp_err_t PsychicWebSocketClient::sendMessage(httpd_ws_type_t", 1)[0]
+require("httpd_ws_send_frame_async" not in client_send, "Non-request WebSocket sends must not bypass the HTTPD queue")
+require("HTTPD_WS_TYPE_CLOSE" not in websocket_source, "ESP-IDF must own WebSocket close frames")
+require("HTTPD_WS_TYPE_PING" not in websocket_source, "ESP-IDF must own WebSocket ping frames")
+require("TCP_NODELAY" not in server_source, "HTTP and WebSocket sockets must use the supported TCP defaults")
+require("#ifdef WIFI_USE_STATIC_BUFFERS\n    WiFi.useStaticBuffers(true);\n#endif" in wifi_source)
+require(wifi_source.index("WiFi.useStaticBuffers(true);") < wifi_source.index("WiFi.mode(WIFI_MODE_STA)"))
 pico2_start = pico_config.index("[env:esp32-d0-pico2]")
 pico2_config = pico_config[pico2_start:]
-assert "WIFI_USE_STATIC_BUFFERS" not in pico2_config, "DigNext2 profile must not park WiFi buffers in internal RAM"
-assert "CONFIG_RECOVERY_ENABLED" not in pico2_config, "DigNext2 profile must not auto-rollback user saves on panic"
-assert "#define CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 8" in wifi_buffer_config
-assert "#define CONFIG_ESP_WIFI_TX_BUFFER_TYPE 0" in wifi_buffer_config
-assert "#undef CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER" in wifi_buffer_config
-assert "max_open_sockets = 6" in server_source, "HTTP server must reserve enough client slots for UI + WS"
-assert "kPresetDmaMinBytes = 8192" in lights_control_source, "Preset folder scan must wait for healthy DMA headroom"
-assert "refreshBuiltinPresetLabels" in lights_control_source, "Preset labels must refresh without wiping RAM cache"
-assert "bool hasBroadcastRecipient(const String &event, const String &originId);" in event_socket_header
+require("-D WIFI_USE_STATIC_BUFFERS=1" in pico2_config)
+require("-include lib/framework/WiFiStaticBuffers.h" in pico2_config)
+require("#define CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM 3" in wifi_buffer_config)
+require("#define CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 4" in wifi_buffer_config)
+require("-D ML_RELEASE_BTDM_MEMORY=1" in pico2_config, "DigNext2 must return its unused Bluetooth reservation to internal RAM")
+require("heap_caps_malloc_extmem_enable(128);" in main_source,
+        "Network payload allocations must use PSRAM instead of exhausting internal RAM")
+require(main_source.index("heap_caps_malloc_extmem_enable(128);") < main_source.index("esp32sveltekit.begin()"),
+        "The PSRAM malloc policy must be active before networking starts")
+require("CONFIG_RECOVERY_ENABLED" not in pico2_config, "DigNext2 profile must not auto-rollback user saves on panic")
+require("max_open_sockets = 6" in server_source, "HTTP server must reserve enough client slots for UI + WS")
+require("kPresetDmaMinBytes = 8192" in preset_controller_source, "Preset folder scan must wait for healthy DMA headroom")
+require("std::array<CachedPreset, kPresetCount> staged{};" in preset_controller_source, "Preset scans must stage a complete replacement before committing")
+require("for (size_t i = 0; i < _cached.size(); i++) std::swap(_cached[i], staged[i]);" in preset_controller_source, "Preset scans must commit only after a complete scan")
+require("presetSlotDisplayLabel(savedLabels[select - 1].data(), builtinVestPresetLabel(select))" in preset_controller_source,
+        "Saved preset labels must take precedence over built-in labels")
+require("bool hasBroadcastRecipient(const String &event, const String &originId);" in event_socket_header)
 query_start = event_socket_source.index("bool EventSocket::hasBroadcastRecipient")
 query_end = event_socket_source.index("// 🌙 Client info", query_start)
 query_source = event_socket_source[query_start:query_end]
-assert query_source.index("xSemaphoreTake(clientSubscriptionsMutex") < query_source.index("client_subscriptions.find(event)")
-assert query_source.index("client_subscriptions.find(event)") < query_source.index("xSemaphoreGive(clientSubscriptionsMutex)")
-assert event_guard in event_endpoint_source
+require(query_source.index("xSemaphoreTake(clientSubscriptionsMutex") < query_source.index("client_subscriptions.find(event)"))
+require(query_source.index("client_subscriptions.find(event)") < query_source.index("xSemaphoreGive(clientSubscriptionsMutex)"))
+require(event_guard in event_endpoint_source)
 event_sync = event_endpoint_source.index("void syncState")
-assert event_endpoint_source.index(event_guard, event_sync) < event_endpoint_source.index("_statefulService->read", event_sync)
-assert "syncState(originId, true)" in event_endpoint_source, "Subscriptions must still receive initial state"
-assert "JsonDocument jsonDocument(PsychicJsonAllocator::instance());" in event_endpoint_source
-assert 'jsonDocument["event"] = _event;' in event_endpoint_source
-assert 'JsonObject root = jsonDocument["data"].to<JsonObject>();' in event_endpoint_source
-assert "_socket->emitEvent(jsonDocument, originId.c_str(), sync);" in event_endpoint_source
-assert websocket_guard in websocket_server_source
+require(event_endpoint_source.index(event_guard, event_sync) < event_endpoint_source.index("_statefulService->read", event_sync))
+require("syncState(originId, true)" in event_endpoint_source, "Subscriptions must still receive initial state")
+require("JsonDocument jsonDocument(PsychicJsonAllocator::instance());" in event_endpoint_source)
+require('jsonDocument["event"] = _event;' in event_endpoint_source)
+require('JsonObject root = jsonDocument["data"].to<JsonObject>();' in event_endpoint_source)
+require("_socket->emitEvent(jsonDocument, originId.c_str(), sync);" in event_endpoint_source)
+require(websocket_guard in websocket_server_source)
 transmit_data = websocket_server_source.index("void transmitData")
-assert websocket_server_source.index(websocket_guard, transmit_data) < websocket_server_source.index("_statefulService->read", transmit_data)
-assert "transmitData(client, WEB_SOCKET_ORIGIN);" in websocket_server_source, "New clients must still receive initial state"
-assert "JsonDocument jsonDocument(PsychicJsonAllocator::instance());" in websocket_server_source
-assert 'if (!_readAfterUpdate)' in http_endpoint_source
-assert 'return request->reply(200, "application/json", "{}");' in http_endpoint_source
-assert 'AuthenticationPredicates::IS_AUTHENTICATED, false)' in file_manager_source
-assert "uint32_t _sketchSize = 0;" in system_status_header
-assert "esp_image_get_metadata(&position, &metadata)" in system_status_source
-assert "_sketchSize = metadata.image_len;" in system_status_source
-assert "ESP.getSketchSize()" not in system_status_source, "System status must not re-enter the hardware SHA engine"
+require(websocket_server_source.index(websocket_guard, transmit_data) < websocket_server_source.index("_statefulService->read", transmit_data))
+require("transmitData(client, WEB_SOCKET_ORIGIN);" in websocket_server_source, "New clients must still receive initial state")
+require("JsonDocument jsonDocument(PsychicJsonAllocator::instance());" in websocket_server_source)
+require('if (!_readAfterUpdate)' in http_endpoint_source)
+require('return request->reply(200, "application/json", "{}");' in http_endpoint_source)
+require('AuthenticationPredicates::IS_AUTHENTICATED, false)' in file_manager_source)
+require("uint32_t _sketchSize = 0;" in system_status_header)
+require("esp_image_get_metadata(&position, &metadata)" in system_status_source)
+require("_sketchSize = metadata.image_len;" in system_status_source)
+require("ESP.getSketchSize()" not in system_status_source, "System status must not re-enter the hardware SHA engine")
+require("DmaReserve" not in sveltekit_source + system_status_source + main_source, "The polling reserve must not recreate the DMA boot cliff")
+bt_release = main_source.index("esp_bt_controller_mem_release(ESP_BT_MODE_BTDM)")
+require(bt_release < main_source.index("Serial.begin", main_source.index("void setup()")), "Bluetooth memory must be released before runtime services fragment internal RAM")
+require('root["largest_free_dma"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);' in system_status_source)
 
-on_update = lights_control_source.index("void onUpdate")
-loop20ms = lights_control_source.index("void loop20ms() override")
-assert 'copyFile(presetFile.c_str(), "/.config/effects.json")' not in lights_control_source[on_update:loop20ms], "Preset copies must not run on the httpd update path"
-assert 'applyCachedPreset(' in lights_control_source[loop20ms:], 'Preset apply must stay in RAM on loop20ms'
-assert 'writePresetSlotFromCache(' in lights_control_source[loop20ms:], 'Preset slot save must write via fd off the live path'
-assert 'SharedFSPersistence::writeJsonPath' in lights_control_source, 'Preset slot writes must use atomic fd persistence'
-assert 'copyFile(' not in lights_control_source[loop20ms:], 'Preset apply must not copy files on the live path'
-assert 'lastDriversSnapshot' in (Path(__file__).parents[1] / "src/MoonLight/Nodes/Drivers/D_FastLEDAudio.h").read_text(), "Audio driver meters must use throttled snapshots"
+require("allocMBObject<ModuleLightsControlPresetController>" in lights_control_source,
+        "The fixed preset cache/controller must live in PSRAM")
+require("_presets->handleUpdate(updatedItem);" in lights_control_source, "HTTP updates must enqueue preset work through the controller")
+require("_presets->process(millis());" in lights_control_source, "Preset filesystem/apply work must run from loop20ms")
+require("xSemaphoreCreateMutex()" in preset_controller_source, "HTTP saves and loop applies must serialize preset cache access")
+require("lockCache();\n    const CachedPreset& cached" in preset_controller_source,
+        "Preset cache reads must not race HTTP save replacement")
+require("_owner.updateWithoutPropagation(updateCatalog, origin)" in preset_controller_source,
+        "Preset catalog writes must use the owner state transaction")
+require("bool applyCached(" in preset_controller_source, "Preset apply must stay in RAM")
+require("SharedFSPersistence::writeJsonPath" in preset_controller_source, "Preset slot writes must use atomic fd persistence")
+require("copyFile(" not in preset_controller_source, "Preset apply must not copy files on the live path")
+require('lastDriversSnapshot' in (Path(__file__).parents[1] / "src/MoonLight/Nodes/Drivers/D_FastLEDAudio.h").read_text(), "Audio driver meters must use throttled snapshots")
 status_handler = system_status_source.index("esp_err_t SystemStatus::systemStatus")
-assert "ESP.getSketchSize()" not in system_status_source[status_handler:], "Live status requests must not re-enter the hardware SHA engine"
-assert "/rest/saveGolden" in file_manager_source, "Golden snapshot must be exposed over REST"
-assert "/rest/restoreGolden" in file_manager_source, "Golden restore must be exposed over REST"
-assert "goldenSaveSnapshot()" in file_manager_source, "Golden save must use fd tree copy"
-assert "goldenRestoreSnapshot()" in file_manager_source, "Golden restore must use fd tree copy"
-assert "isProtectedGoldenPath" in file_manager_source, "Golden tree must be hidden from file manager"
-assert "pollDigNext2Buttons" in lights_control_source, "Dig-Next-2 buttons must be polled from loop20ms"
-assert "toggleDigNext2Power" in lights_control_source, "Dig-Next-2 both-hold must toggle relay via lightsOn"
-assert "DIG_NEXT2_BOTH_POWER_MS" in (Path(__file__).parents[1] / "src/MoonLight/Modules/DigNext2ButtonPolicy.h").read_text(), "Dig-Next-2 power hold timing must be defined"
-assert "ARDUINO_EVENT_WIFI_STA_GOT_IP" in sveltekit_source, "mDNS must start/announce on STA GOT_IP"
-assert "kMaxAnnounceFailures" in sveltekit_source, "mDNS must restart after repeated announce failures"
-assert "mdnsShouldStartAtBoot" not in sveltekit_source, "mDNS must not start before Wi-Fi has an address"
-mdns_hook = sveltekit_source.index("_mdnsLifecycleHooksRegistered")
+require("ESP.getSketchSize()" not in system_status_source[status_handler:], "Live status requests must not re-enter the hardware SHA engine")
+require("/rest/saveGolden" in file_manager_source, "Golden snapshot must be exposed over REST")
+require("/rest/restoreGolden" in file_manager_source, "Golden restore must be exposed over REST")
+require("goldenSaveSnapshot()" in file_manager_source, "Golden save must use fd tree copy")
+require("goldenRestoreSnapshot()" in file_manager_source, "Golden restore must use fd tree copy")
+require("isProtectedGoldenPath" in file_manager_source, "Golden tree must be hidden from file manager")
+require("pollDigNext2Buttons" in lights_control_source, "Dig-Next-2 buttons must be polled from loop20ms")
+require("toggleDigNext2Power" in lights_control_source, "Dig-Next-2 both-hold must toggle relay via lightsOn")
+require("DIG_NEXT2_BOTH_POWER_MS" in (Path(__file__).parents[1] / "src/MoonLight/Modules/DigNext2ButtonPolicy.h").read_text(), "Dig-Next-2 power hold timing must be defined")
+require("std::array<VirtualLayer*, 16> layers{};" in physical_layer_header, "VirtualLayer slots must be fixed-size storage")
+require("layers.resize" not in physical_layer_source, "PhysicalLayer must not heap-grow its fixed layer table")
+require("new VirtualLayer" not in physical_layer_source, "VirtualLayers must not use the raw heap allocator")
+require("VirtualLayer* layer = allocMBObject<VirtualLayer>();" in physical_layer_source, "VirtualLayers must use the PSRAM-preferred object allocator")
+require("void PhysicalLayer::destroyLayer" in physical_layer_source and "freeMBObject(layer);" in physical_layer_source,
+        "VirtualLayer retirement must pair with the object allocator")
+require("delete backup.layers" not in layer_manager_source and "delete layerP.layers" not in layer_manager_source,
+        "LayerManager must retire VirtualLayers through the paired helper")
+require("layerP.rebindDriverNodes(layerP.layers[0]);" in layer_manager_source, "Committed replacements must rebind physical drivers before retirement")
+require("layerP.rebindDriverNodes(backup.layers[0]);" in layer_manager_source, "Rollback must rebind physical drivers before staged retirement")
+require("layerMgr.selectLayer(0, false)" in module_effects_source and "effects module disabled" in module_effects_source,
+        "Effects startup must fail safely when layer zero cannot be allocated")
+network_start = sveltekit_source.index("Network.begin()")
+mdns_start = sveltekit_source.index("startMdns();", network_start)
 init_wifi = sveltekit_source.index("_wifiSettingsService.initWiFi()")
-assert mdns_hook < init_wifi, "mDNS hooks must register before Wi-Fi init"
+require(network_start < mdns_start < init_wifi, "event loop and mDNS must start before Wi-Fi fragments internal RAM")
+require("WiFi.onEvent(" not in sveltekit_source, "Espressif mDNS owns the Wi-Fi/IP lifecycle")
+require("restartMdns" not in sveltekit_source, "mDNS must not tear down its 4KB task under memory pressure")
+require("MDNS.end()" not in sveltekit_source, "mDNS lifecycle stays owned by the responder until reboot")
+restart_source = (Path(__file__).parents[1] / "lib/framework/RestartService.h").read_text()
+require("MDNS.end()" not in restart_source, "reboot path must not race mDNS teardown against the framework loop")
+
+print("WS/heap hardening checks passed")

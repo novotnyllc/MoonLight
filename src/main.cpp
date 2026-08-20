@@ -13,6 +13,11 @@
  **/
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
+
+#ifdef ML_RELEASE_BTDM_MEMORY
+  #include <esp_bt.h>
+#endif
 
 #if defined(BOARD_HAS_PSRAM) && defined(CONFIG_SPIRAM_MODE_OCT)
 
@@ -78,12 +83,13 @@ void operator delete[](void* ptr, size_t size) noexcept {
 #endif
 
 #include <ESP32SvelteKit.h>
-#include <DmaReserve.h>
 #include <PsychicHttpServer.h>
 
 #define SERIAL_BAUD_RATE 115200
 
+#ifdef ML_WEARABLE_FIELD_BOOT
 static bool bootGoldenRestoreRequested = false;
+#endif
 
 PsychicHttpServer server;
 
@@ -95,9 +101,6 @@ ESP32SvelteKit esp32sveltekit(&server, NROF_END_POINTS);  // 🌙 pio variable
   #include "MoonBase/Modules/ModuleIO.h"
   #include "MoonBase/Modules/ModuleTasks.h"
   #include "MoonBase/GoldenConfig.h"
-  #ifdef ML_WEARABLE_FIELD_BOOT
-    #include "MoonBase/WearableBootRecovery.h"
-  #endif
 
 FileManager fileManager = FileManager(&server, &esp32sveltekit);
 ModuleTasks moduleTasks = ModuleTasks(&server, &esp32sveltekit);
@@ -299,9 +302,19 @@ SharedEventEndpoint* sharedEventEndpoint = nullptr;
 SharedFSPersistence* sharedFsPersistence = nullptr;
 
 void setup() {
+#ifdef ML_RELEASE_BTDM_MEMORY
+  const esp_err_t btMemoryReleaseResult = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+#endif
+
 #ifdef USE_ESP_IDF_LOG  // 🌙
   esp_log_set_vprintf(custom_vprintf);
   esp_log_level_set("*", LOG_LOCAL_LEVEL);  // use the platformio setting here
+#endif
+
+#ifdef ML_RELEASE_BTDM_MEMORY
+  if (btMemoryReleaseResult != ESP_OK) {
+    ESP_LOGW(ML_TAG, "Unable to release unused Bluetooth memory: %s", esp_err_to_name(btMemoryReleaseResult));
+  }
 #endif
 
   // start serial and filesystem
@@ -336,7 +349,7 @@ void setup() {
 
   Serial.printf("C++ Standard: %ld\n", __cplusplus);  // ok-lint: Serial used before logging is initialized
 
-#ifdef FACTORY_SAFE_MODE_BUTTON
+#if defined(ML_WEARABLE_FIELD_BOOT) && defined(FACTORY_SAFE_MODE_BUTTON)
   pinMode(FACTORY_SAFE_MODE_BUTTON, INPUT);  // Dig-Next-2 has a hardware pull-up on GPIO34
   delay(25);
   if (digitalRead(FACTORY_SAFE_MODE_BUTTON) == LOW) {
@@ -351,7 +364,7 @@ void setup() {
   }
 #endif
 
-#ifdef FACTORY_GOLDEN_RESTORE_BUTTON
+#if defined(ML_WEARABLE_FIELD_BOOT) && defined(FACTORY_GOLDEN_RESTORE_BUTTON)
   pinMode(FACTORY_GOLDEN_RESTORE_BUTTON, INPUT);
   delay(25);
   if (digitalRead(FACTORY_GOLDEN_RESTORE_BUTTON) == LOW) {
@@ -368,6 +381,10 @@ void setup() {
 
 #if defined(BOARD_HAS_PSRAM)
   if (psramFound()) {
+    // Keep tiny control objects internal, but place network payloads in PSRAM.
+    // The Arduino default (4096) strands ~2 MB of PSRAM while lwIP/mDNS fail
+    // allocations in the fragmented internal heap.
+    heap_caps_malloc_extmem_enable(128);
     // Initialize the ESP-IDF log path while internal memory is plentiful. Large
     // HTTP JSON documents use their own PSRAM allocator; performance-critical
     // FFT and DMA state retain the platform's normal internal-memory policy.
@@ -377,15 +394,42 @@ void setup() {
   }
 #endif
 
-#ifdef ML_WEARABLE_FIELD_BOOT
-  wearableRecordBootResetReason();
-  // Field wearables: panic reboot loads normal floppy config; safe mode is opt-in via Button_1 @ boot only.
-#else
+#ifndef ML_WEARABLE_FIELD_BOOT
   if (esp_reset_reason() != ESP_RST_UNKNOWN && esp_reset_reason() != ESP_RST_POWERON && esp_reset_reason() != ESP_RST_SW && esp_reset_reason() != ESP_RST_USB) {  // see verbosePrintResetReason
     // ESP_RST_USB is after usb flashing! since esp-idf5
     safeModeMB = true;
   }
 #endif
+
+#if FT_ENABLED(FT_MOONBASE)
+  // Mount without formatting so recovery can repair/restore the persisted tree before
+  // ESP32SvelteKit loads security, network, or other live configuration.
+  if (!ESPFS.begin(false)) {
+    ESP_LOGE(ML_TAG, "LittleFS mount failed; refusing format-on-failure during recovery boot");
+    return;
+  }
+  if (!goldenRepairInterruptedSwaps()) {
+    ESP_LOGE(ML_TAG, "Interrupted configuration swap recovery failed; startup stopped");
+    return;
+  }
+  #ifdef ML_WEARABLE_FIELD_BOOT
+  if (bootGoldenRestoreRequested) {
+    if (!goldenRestoreSnapshot()) {
+      ESP_LOGE(ML_TAG, "Golden restore requested at boot but snapshot restore failed");
+      return;
+    }
+    ESP_LOGW(ML_TAG, "Restored golden configuration from %s with LiveScripts disabled; rebooting",
+             GOLDEN_CONFIG_LOGICAL);
+    ESP.restart();
+    return;
+  }
+  #endif
+#endif
+
+  #if FT_ENABLED(FT_MOONBASE)
+  esp32sveltekit.setFactoryResetHook([] { return goldenFactoryReset(); });
+  esp32sveltekit.setStatusAppender([](JsonObject status) { status["goldenPresent"] = goldenConfigPresent(); });
+  #endif
 
   // start ESP32-SvelteKit
   if (!esp32sveltekit.begin()) {
@@ -431,25 +475,6 @@ void setup() {
 // MoonBase
 #if FT_ENABLED(FT_MOONBASE)
   fileManager.begin();
-#ifdef ML_WEARABLE_FIELD_BOOT
-  bool autoGoldenRestore = false;
-  if (!bootGoldenRestoreRequested && wearableShouldOfferAutoGoldenRestore() && goldenConfigPresent()) {
-    bootGoldenRestoreRequested = true;
-    autoGoldenRestore = true;
-    ESP_LOGW(ML_TAG, "Auto golden restore after %u unstable boots", WEARABLE_PANIC_BOOT_THRESHOLD);
-  }
-#endif
-  if (bootGoldenRestoreRequested) {
-    if (goldenRestoreSnapshot()) {
-      ESP_LOGW(ML_TAG, "Restored golden configuration from %s", GOLDEN_CONFIG_LOGICAL);
-#ifdef ML_WEARABLE_FIELD_BOOT
-      if (autoGoldenRestore) wearableMarkAutoGoldenRestoreUsed();
-#endif
-    } else {
-      ESP_LOGE(ML_TAG, "Golden restore requested at boot but snapshot restore failed");
-    }
-    bootGoldenRestoreRequested = false;
-  }
   for (Module* module : modules) {
     module->begin();
   }
@@ -461,7 +486,9 @@ void setup() {
   sharedFsPersistence->begin();
 #if FT_ENABLED(FT_MOONLIGHT)
   moduleLightsControl.afterPersistenceLoaded();
+#ifdef ML_WEARABLE_FIELD_BOOT
   moduleLightsControl.forceWearablePowerOn();
+#endif
 #endif
 
   // 🌙
@@ -492,10 +519,6 @@ void setup() {
   }
   #endif  // MoonLight
 
-#if FT_ENABLED(FT_WIFI)
-  dmaReserve::init();
-#endif
-
   // run UI stuff in the sveltekit task
   esp32sveltekit.addLoopFunction([]() {
     for (Module* module : modules) module->loop();
@@ -512,10 +535,6 @@ void setup() {
         lastSecond = millis();
 
         for (Module* module : modules) module->loop1s();
-
-#ifdef ML_WEARABLE_FIELD_BOOT
-        wearableMaybeMarkStable(millis());
-#endif
 
         // every 10 seconds
         static unsigned long last10Second = 0;
@@ -623,9 +642,3 @@ void loop() {
   #endif
 #endif
 }
-
-#if FT_MOONBASE == 1
-bool moonbaseGoldenConfigPresent() {
-  return goldenConfigPresent();
-}
-#endif

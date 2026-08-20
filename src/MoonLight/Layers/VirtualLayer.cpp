@@ -27,8 +27,7 @@ VirtualLayer::~VirtualLayer() {
   EXT_LOGV(ML_TAG, "destructor");
 
   for (Node* node : nodes) {
-    // node->destructor();
-    delete node;
+    freeMBObject(node);
   }
   nodes.clear();
 

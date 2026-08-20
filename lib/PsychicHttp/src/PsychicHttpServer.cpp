@@ -28,7 +28,6 @@ PsychicHttpServer::PsychicHttpServer() :
   config.max_open_sockets = 6;
   config.lru_purge_enable = true;
   config.recv_wait_timeout = 2;
-  config.send_wait_timeout = 2;
   //🌙
   #ifdef HTTPD_STACK_SIZE
     config.stack_size = HTTPD_STACK_SIZE;

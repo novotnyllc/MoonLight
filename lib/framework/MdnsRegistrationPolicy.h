@@ -1,60 +1,101 @@
 #pragma once
 
-#include <cstddef>
+#include <cstdint>
 
-template <typename RegisterHandler, typename IsConnected, typename Announce>
-inline void registerMdnsStaGotIp(RegisterHandler registerHandler, IsConnected isConnected, Announce announce)
+enum class MdnsMaintainAction : uint8_t
 {
-    registerHandler(announce);
-    if (isConnected())
-        announce();
+    None,
+    CheckStart,
+    RecoverInterface,
+    RefreshHttpService,
+};
+
+struct MdnsMaintainState
+{
+    bool sawConnected = false;
+    // Remaining best-effort API calls, not confirmed announcements. The
+    // installed ESPmDNS can return ESP_OK after dropping its queue send.
+    uint8_t announceAttempts = 0;
+    uint32_t lastMaintain = 0;
+    bool httpServiceApiOk = true;
+};
+
+struct MdnsMaintainDecision
+{
+    MdnsMaintainState state;
+    MdnsMaintainAction action = MdnsMaintainAction::None;
+    bool checkHostname = false;
+};
+
+inline MdnsMaintainDecision mdnsMaintainTransition(MdnsMaintainState state, bool wifiConnected, bool mdnsStarted,
+                                                    uint32_t now)
+{
+    MdnsMaintainDecision decision{state};
+    if (!wifiConnected)
+    {
+        decision.state.sawConnected = false;
+        return decision;
+    }
+
+    constexpr uint32_t kAnnounceRetryInterval = 1000UL;
+    constexpr uint8_t kAnnounceAttempts = 3;
+    constexpr uint32_t kRefreshInterval = 60000UL;
+    constexpr uint32_t kRecoveryInterval = 15000UL;
+
+    if (!mdnsStarted)
+    {
+        if (state.lastMaintain && static_cast<uint32_t>(now - state.lastMaintain) < kRecoveryInterval)
+            return decision;
+        decision.state.lastMaintain = now;
+        decision.action = MdnsMaintainAction::CheckStart;
+        return decision;
+    }
+
+    if (!state.sawConnected)
+    {
+        decision.state.sawConnected = true;
+        decision.state.announceAttempts = kAnnounceAttempts;
+        decision.state.lastMaintain = now - kAnnounceRetryInterval;
+    }
+
+    if (decision.state.announceAttempts == 0)
+    {
+        const uint32_t interval = decision.state.httpServiceApiOk ? kRefreshInterval : kAnnounceRetryInterval;
+        if (static_cast<uint32_t>(now - decision.state.lastMaintain) < interval)
+            return decision;
+        decision.state.lastMaintain = now;
+        decision.action = MdnsMaintainAction::RefreshHttpService;
+        decision.checkHostname = true;
+        return decision;
+    }
+
+    if (static_cast<uint32_t>(now - decision.state.lastMaintain) < kAnnounceRetryInterval)
+        return decision;
+
+    decision.action = MdnsMaintainAction::RecoverInterface;
+    decision.checkHostname = decision.state.announceAttempts == kAnnounceAttempts;
+    return decision;
 }
 
-template <typename EventAction, typename Send>
-inline void maintainMdnsIp4(EventAction enable, EventAction announce, Send send)
+// Bound best-effort API calls without claiming that ESPmDNS queued or sent an
+// announcement. Definite synchronous failures retain the remaining call budget.
+inline MdnsMaintainState mdnsMaintainComplete(MdnsMaintainState state, uint32_t now, bool apiAccepted = true)
 {
-    send(static_cast<EventAction>(enable | announce));
+    if (apiAccepted && state.announceAttempts > 0)
+        --state.announceAttempts;
+    state.lastMaintain = now;
+    return state;
 }
 
-inline bool mdnsShouldStart(bool alreadyStarted, bool safeMode, bool wifiConnected, size_t largestInternal, size_t minInternal)
+inline MdnsMaintainState mdnsMaintainRetryLater(MdnsMaintainState state, uint32_t now)
 {
-    return !alreadyStarted && !safeMode && wifiConnected && largestInternal >= minInternal;
+    state.lastMaintain = now;
+    return state;
 }
 
-// First-boot begin() may run before STA has an address. Still refuse if DMA is gone.
-inline bool mdnsShouldStartAtBoot(bool alreadyStarted, bool safeMode, size_t largestInternal, size_t minInternal)
+inline MdnsMaintainState mdnsHttpRefreshResult(MdnsMaintainState state, uint32_t now, bool apiOk)
 {
-    return !alreadyStarted && !safeMode && largestInternal >= minInternal;
-}
-
-inline bool mdnsShouldAnnounce(bool alreadyStarted, bool safeMode, bool wifiConnected, size_t largestInternal = SIZE_MAX,
-                               size_t minInternal = 0)
-{
-    return alreadyStarted && !safeMode && wifiConnected && largestInternal >= minInternal;
-}
-
-inline bool mdnsAnnounceSucceeded(int enableResult, int announceResult)
-{
-    return enableResult == 0 && announceResult == 0;
-}
-
-// Started but never announced, or no successful announce within staleMs — restart the responder.
-inline bool mdnsShouldRestart(bool alreadyStarted, bool safeMode, bool wifiConnected, size_t largestInternal,
-                              uint32_t now, uint32_t lastAnnounceOk, uint32_t staleMs, size_t minRestartInternal)
-{
-    if (!alreadyStarted || safeMode || !wifiConnected || largestInternal < minRestartInternal)
-        return false;
-    if (lastAnnounceOk == 0)
-        return true;
-    return (now - lastAnnounceOk) > staleMs;
-}
-
-inline uint32_t mdnsMaintainIntervalMs(bool alreadyStarted, uint32_t now, uint32_t lastAnnounceOk,
-                                       uint32_t healthyIntervalMs, uint32_t recoveryIntervalMs, uint32_t staleMs)
-{
-    if (!alreadyStarted)
-        return recoveryIntervalMs;
-    if (lastAnnounceOk == 0 || (now - lastAnnounceOk) > staleMs)
-        return recoveryIntervalMs;
-    return healthyIntervalMs;
+    state.httpServiceApiOk = apiOk;
+    state.lastMaintain = now;
+    return state;
 }

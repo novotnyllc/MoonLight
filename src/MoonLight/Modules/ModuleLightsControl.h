@@ -12,40 +12,7 @@
 #ifndef ModuleLightsControl_h
 #define ModuleLightsControl_h
 
-#include <cstddef>
-#include <cstring>
-
-inline bool isPresetLabelWhitespace(char value) {
-  return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' || value == '\v';
-}
-
-inline void extractPresetDisplayLabel(char (&label)[32], const char* explicitLabel, const char* nodeName) {
-  label[0] = '\0';
-
-  if (explicitLabel) {
-    size_t begin = 0;
-    size_t end = std::strlen(explicitLabel);
-    while (begin < end && isPresetLabelWhitespace(explicitLabel[begin])) begin++;
-    while (end > begin && isPresetLabelWhitespace(explicitLabel[end - 1])) end--;
-    if (end > begin) {
-      size_t length = end - begin;
-      if (length > sizeof(label) - 1) length = sizeof(label) - 1;
-      std::memcpy(label, explicitLabel + begin, length);
-      label[length] = '\0';
-      return;
-    }
-  }
-
-  if (!nodeName) return;
-
-  size_t length = 0;
-  while (nodeName[length] && length < sizeof(label) - 1 && static_cast<unsigned char>(nodeName[length]) < 0x80) {
-    label[length] = nodeName[length];
-    length++;
-  }
-  while (length > 0 && label[length - 1] == ' ') length--;
-  label[length] = '\0';
-}
+#include "MoonLight/Modules/ModuleLightsControlPresets.h"
 
 #if FT_MOONLIGHT
 
@@ -61,8 +28,6 @@ inline void extractPresetDisplayLabel(char (&label)[32], const char* explicitLab
   #include "MoonBase/utilities/PlatformFunctions.h"  //for isInPSRAM
   #include "MoonLight/Modules/DigNext2ButtonPolicy.h"
   #include "palettes.h"
-
-inline uint32_t g_presetApplies = 0;
 
   #if FT_LIVESCRIPT
     #include "MoonBase/LiveScriptNode.h"
@@ -93,8 +58,9 @@ StateUpdateResult updateMQTT(JsonObject& root, ModuleState& state, const String&
 
 class ModuleLightsControl : public Module {
  private:
-  static constexpr uint8_t kBuiltinVestPresetCount = 20;
+  static constexpr uint8_t kPresetCount = ModuleLightsControlPresetController::kPresetCount;
 
+  ModuleLightsControlPresetController* _presets = nullptr;
   MqttEndpoint<ModuleState>* _mqttEndpoint = nullptr;  // pointer, dynamically allocated
   #if FT_ENABLED(FT_MQTT)
   PsychicMqttClient* _mqttClient;
@@ -107,8 +73,10 @@ class ModuleLightsControl : public Module {
   uint8_t pinRelayLightsOn = UINT8_MAX;
   uint8_t pinPushButtonLightsOn = UINT8_MAX;
   uint8_t pinToggleButtonLightsOn = UINT8_MAX;
+#ifdef ML_WEARABLE_FIELD_BOOT
   uint8_t pinDigNext2Button1 = UINT8_MAX;
   uint8_t pinDigNext2Button2 = UINT8_MAX;
+#endif
   uint8_t pinPIR = UINT8_MAX;
 
   ModuleLightsControl(PsychicHttpServer* server, ESP32SvelteKit* sveltekit, FileManager* fileManager, ModuleIO* moduleIO)
@@ -128,10 +96,14 @@ class ModuleLightsControl : public Module {
 
   void begin() override {
     Module::begin();
+    _presets = allocMBObject<ModuleLightsControlPresetController>(*this, _state);
+    if (!_presets) abort();
 
     EXT_LOGD(ML_TAG, "Lights:%d(Header:%d) L-H:%d Node:%d PL:%d(PL-L:%d) VL:%d PM:%d C3D:%d", sizeof(Lights), sizeof(LightsHeader), sizeof(Lights) - sizeof(LightsHeader), sizeof(Node), sizeof(PhysicalLayer), sizeof(PhysicalLayer) - sizeof(Lights), sizeof(VirtualLayer), sizeof(PhysMap), sizeof(Coord3D));
 
-    EXT_LOGD(ML_TAG, "isInPSRAM: mt:%d mti:%d ch:%d", isInPSRAM(layerP.layers[0]->mappingTable), isInPSRAM(layerP.layers[0]->mappingTableIndexes.data()), isInPSRAM(layerP.lights.channelsD));
+    if (layerP.layers[0]) {
+      EXT_LOGD(ML_TAG, "isInPSRAM: mt:%d mti:%d ch:%d", isInPSRAM(layerP.layers[0]->mappingTable), isInPSRAM(layerP.layers[0]->mappingTableIndexes.data()), isInPSRAM(layerP.lights.channelsD));
+    }
 
   #ifdef BOARD_HAS_PSRAM
     if (!psramFound) EXT_LOGE(ML_TAG, "Board has PSRAM but not found !!");
@@ -155,8 +127,7 @@ class ModuleLightsControl : public Module {
               }
             }
             if (presetChanged) {
-              EXT_LOGV(ML_TAG, "setPresetsFromFolder");
-              setPresetsFromFolder();  // update the presets from the folder
+              _presets->requestRefresh();
             }
           },
           originId);
@@ -173,29 +144,30 @@ class ModuleLightsControl : public Module {
   #endif
   }
 
+#ifdef ML_WEARABLE_FIELD_BOOT
   void clampWearablePresetSettings() {
     int firstPreset = _state.data["firstPreset"] | 1;
-    int lastPreset = _state.data["lastPreset"] | kBuiltinVestPresetCount;
+    int lastPreset = _state.data["lastPreset"] | kPresetCount;
     if (firstPreset < 1) firstPreset = 1;
-    if (lastPreset > kBuiltinVestPresetCount) lastPreset = kBuiltinVestPresetCount;
+    if (lastPreset > kPresetCount) lastPreset = kPresetCount;
     if (firstPreset > lastPreset) firstPreset = 1;
     bool changed = false;
     if ((_state.data["firstPreset"] | 1) != firstPreset) {
       _state.data["firstPreset"] = firstPreset;
       changed = true;
     }
-    if ((_state.data["lastPreset"] | kBuiltinVestPresetCount) != lastPreset) {
+    if ((_state.data["lastPreset"] | kPresetCount) != lastPreset) {
       _state.data["lastPreset"] = lastPreset;
       changed = true;
     }
-    if ((_state.data["preset"]["count"] | 0) != kBuiltinVestPresetCount) {
-      _state.data["preset"]["count"] = kBuiltinVestPresetCount;
+    if ((_state.data["preset"]["count"] | 0) != kPresetCount) {
+      _state.data["preset"]["count"] = kPresetCount;
       changed = true;
     }
     JsonArray list = _state.data["preset"]["list"];
     for (size_t i = list.size(); i-- > 0;) {
       const int seq = list[i] | 0;
-      if (seq < 1 || seq > kBuiltinVestPresetCount) {
+      if (seq < 1 || seq > kPresetCount) {
         list.remove(i);
         if (_state.data["preset"]["labels"].is<JsonArray>() && i < _state.data["preset"]["labels"].size()) {
           _state.data["preset"]["labels"].remove(i);
@@ -205,11 +177,14 @@ class ModuleLightsControl : public Module {
     }
     if (changed) update([&](ModuleState&) { return StateUpdateResult::CHANGED; }, _moduleName);
   }
+#endif
 
   // Call after SharedFSPersistence::begin() so persisted lightscontrol.json does not wipe preset list.
   void afterPersistenceLoaded() {
+#ifdef ML_WEARABLE_FIELD_BOOT
     clampWearablePresetSettings();
-    setPresetsFromFolder();
+#endif
+    _presets->begin();
   }
 
   #if FT_ENABLED(FT_MQTT)
@@ -324,8 +299,10 @@ class ModuleLightsControl : public Module {
           pinRelayLightsOn = UINT8_MAX;
           pinPushButtonLightsOn = UINT8_MAX;
           pinToggleButtonLightsOn = UINT8_MAX;
+#ifdef ML_WEARABLE_FIELD_BOOT
           pinDigNext2Button1 = UINT8_MAX;
           pinDigNext2Button2 = UINT8_MAX;
+#endif
           pinPIR = UINT8_MAX;
           for (JsonObject pinObject : state.data["pins"].as<JsonArray>()) {
             uint8_t usage = pinObject["usage"];
@@ -358,6 +335,7 @@ class ModuleLightsControl : public Module {
                 EXT_LOGD(ML_TAG, "pinToggleButtonLightsOn found %d", pinToggleButtonLightsOn);
               } else
                 EXT_LOGE(MB_TAG, "gpio %d not valid", pinToggleButtonLightsOn);
+#ifdef ML_WEARABLE_FIELD_BOOT
             } else if (usage == pin_DigNext2_Button1) {
               if (GPIO_IS_VALID_GPIO(gpio)) {
                 pinDigNext2Button1 = gpio;
@@ -372,6 +350,7 @@ class ModuleLightsControl : public Module {
                 EXT_LOGD(ML_TAG, "pinDigNext2Button2 found %d", pinDigNext2Button2);
               } else
                 EXT_LOGE(MB_TAG, "gpio %d not valid", pinDigNext2Button2);
+#endif
             } else if (usage == pin_PIR) {
               if (GPIO_IS_VALID_GPIO(gpio)) {
                 pinPIR = gpio;
@@ -393,10 +372,12 @@ class ModuleLightsControl : public Module {
 
     control = addControl(controls, "lightsOn", "checkbox");
     control["default"] = true;
+#ifdef ML_WEARABLE_FIELD_BOOT
     control = addControl(controls, "bootLightsOn", "checkbox");
     control["default"] = true;
     control = addControl(controls, "bootBrightness", "slider", 1, 255, false, "At power-on");
     control["default"] = 128;
+#endif
     control = addControl(controls, "brightness", "slider");
     control["default"] = 20;
     control = addControl(controls, "red", "slider");
@@ -461,14 +442,14 @@ class ModuleLightsControl : public Module {
     control["default"].to<JsonObject>();  // clear the preset array before adding new presets
     control["default"]["list"].to<JsonArray>();
     control["default"]["labels"].to<JsonArray>();
-    control["default"]["count"] = kBuiltinVestPresetCount;
+    control["default"]["count"] = kPresetCount;
 
     control = addControl(controls, "presetLoop", "slider");
     control["default"] = 0;
-    control = addControl(controls, "firstPreset", "slider", 1, kBuiltinVestPresetCount);
+    control = addControl(controls, "firstPreset", "slider", 1, kPresetCount);
     control["default"] = 1;
-    control = addControl(controls, "lastPreset", "slider", 1, kBuiltinVestPresetCount);
-    control["default"] = kBuiltinVestPresetCount;
+    control = addControl(controls, "lastPreset", "slider", 1, kPresetCount);
+    control["default"] = kPresetCount;
 
   #if FT_ENABLED(FT_MONITOR)
     control = addControl(controls, "monitorOn", "checkbox");
@@ -550,288 +531,9 @@ class ModuleLightsControl : public Module {
         }
       }
     } else if (updatedItem.name == "preset") {
-      // copy /.config/effects.json to the hidden folder /.config/presets/preset[x].json
-      // do not set preset at boot...
       if (updatedItem.oldValue != "" && !updatedItem.value["action"].isNull()) {
-        uint16_t select = updatedItem.value["select"];
-        Char<32> presetFile;
-        presetFile.format("/.config/presets/preset%02d.json", select);
-
-        if (updatedItem.value["action"] == "click") {
-          updatedItem.value["selected"] = select;  // store the selected preset
-          if (select != 255) {
-            const String origin = updatedItem.originId ? *updatedItem.originId : String(_moduleName);
-            const bool copyToEffects = arrayContainsValue(updatedItem.value["list"], select);
-            enqueuePendingPreset(copyToEffects, select, origin);
-          }
-        } else if (updatedItem.value["action"] == "dblclick") {
-          ESPFS.remove(presetFile.c_str());
-          setPresetsFromFolder();  // update presets in UI
-        }
-        // Clear transient action/select fields after processing to prevent stale UI echoes.
-        // The UI sends the full state on every change (e.g. slider drag), which may include
-        // old action/select values that would re-trigger preset operations.
-        _state.data["preset"].remove("action");
-        _state.data["preset"].remove("select");
-        // A click/POST can replace the whole preset object and drop labels.
-        if (_state.data["preset"]["labels"].isNull() || !_state.data["preset"]["labels"].size()) {
-          refreshBuiltinPresetLabels();
-        }
+        _presets->handleUpdate(updatedItem);
       }
-    }
-  }
-
-  // update _state.data["preset"]["list"] and send update to endpoints
-  struct CachedPreset {
-    uint16_t select = 255;
-    char label[32] = "";
-    char* json = nullptr;
-    size_t jsonLen = 0;
-  };
-  std::vector<CachedPreset, VectorRAMAllocator<CachedPreset>> cachedPresets;
-
-  void clearCachedPresets() {
-    for (CachedPreset& cached : cachedPresets) freeMB(cached.json, "presetCache");
-    cachedPresets.clear();
-  }
-
-  static constexpr size_t kPresetDmaMinBytes = 8192;
-
-  bool dmaCanOpenFile() const {
-    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA) >= kPresetDmaMinBytes;
-  }
-
-  bool cachePresetFile(uint16_t select, File& file, char (&label)[32]) {
-    CachedPreset cached;
-    cached.select = select;
-    std::memcpy(cached.label, label, sizeof(cached.label));
-    const size_t size = file.size();
-    if (!size || size > 12288) return false;
-    cached.json = allocMB<char>(size + 1, "presetCache");
-    if (!cached.json) return false;
-    file.seek(0);
-    const size_t got = file.read(reinterpret_cast<uint8_t*>(cached.json), size);
-    cached.json[got] = '\0';
-    cached.jsonLen = got;
-    cachedPresets.push_back(cached);
-    return true;
-  }
-
-  bool applyCachedPreset(uint16_t select, const String& originId) {
-    for (const CachedPreset& cached : cachedPresets) {
-      if (cached.select != select || !cached.json) continue;
-      JsonDocument doc(JsonRAMAllocator::instance());
-      if (deserializeJson(doc, cached.json, cached.jsonLen) || !doc.is<JsonObject>()) return false;
-      applyEffectsObject(doc.as<JsonObject>(), originId);
-      return true;
-    }
-    return false;
-  }
-
-  void cacheLiveEffectsAsPreset(uint16_t select) {
-    extern std::vector<Module*> modules;
-    Module* effects = nullptr;
-    for (Module* module : modules) {
-      if (module && strcmp(module->_moduleName, "effects") == 0) {
-        effects = module;
-        break;
-      }
-    }
-    if (!effects) return;
-    JsonDocument doc(JsonRAMAllocator::instance());
-    JsonObject root = doc.to<JsonObject>();
-    effects->read(root, ModuleState::read, effects->_moduleName);
-    const size_t needed = measureJson(root);
-    if (!needed || needed > 12288) return;
-    char* json = allocMB<char>(needed + 1, "presetCache");
-    if (!json) return;
-    const size_t wrote = serializeJson(root, json, needed + 1);
-    json[wrote] = '\0';
-    char label[32] = "";
-    const char* explicitLabel = root["label"].as<const char*>();
-    const char* nodeName = nullptr;
-    if (root["nodes"].is<JsonArray>() && root["nodes"].size()) nodeName = root["nodes"][0]["name"].as<const char*>();
-    extractPresetDisplayLabel(label, explicitLabel, nodeName);
-    if (!label[0]) snprintf(label, sizeof(label), "Preset %02u", select);
-    for (CachedPreset& cached : cachedPresets) {
-      if (cached.select == select) {
-        freeMB(cached.json, "presetCache");
-        cached.json = json;
-        cached.jsonLen = wrote;
-        std::memcpy(cached.label, label, sizeof(cached.label));
-        return;
-      }
-    }
-    CachedPreset cached;
-    cached.select = select;
-    std::memcpy(cached.label, label, sizeof(cached.label));
-    cached.json = json;
-    cached.jsonLen = wrote;
-    cachedPresets.push_back(cached);
-    JsonArray list = _state.data["preset"]["list"];
-    JsonArray labels = _state.data["preset"]["labels"];
-    bool found = false;
-    for (size_t i = 0; i < list.size(); i++) {
-      if ((list[i] | 0) == select) {
-        if (i < labels.size()) labels[i] = cached.label;
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      list.add(select);
-      labels.add(cached.label);
-    }
-  }
-
-  bool writePresetSlotFromCache(uint16_t select) {
-    for (const CachedPreset& cached : cachedPresets) {
-      if (cached.select != select || !cached.json || !cached.jsonLen) continue;
-      if (!ESPFS.exists("/.config/presets")) ESPFS.mkdir("/.config/presets");
-      Char<32> presetPath;
-      presetPath.format("/.config/presets/preset%02d.json", select);
-      if (SharedFSPersistence::writeJsonPath(presetPath.c_str(), cached.json, cached.jsonLen)) {
-        EXT_LOGI(ML_TAG, "Wrote preset slot %u (%u bytes)", select, static_cast<unsigned>(cached.jsonLen));
-        return true;
-      }
-      EXT_LOGW(ML_TAG, "Failed to write preset slot %u", select);
-      return false;
-    }
-    EXT_LOGW(ML_TAG, "Preset %u not in RAM cache; cannot write slot file", select);
-    return false;
-  }
-
-  static const char* builtinVestPresetLabel(uint8_t seq) {
-    static const char* kVestPresetLabels[kBuiltinVestPresetCount] = {
-      // Motion (1-6)
-      "💫 Horizon Ring",
-      "🌀 Crossing Spiral",
-      "✨ Particle Sphere",
-      "⭐ Star Wave",
-      "💨 Wraparound Racers",
-      "🌊 Ripple Stars",
-      // Audio reactive (7-15)
-      "🎵 Audio Paintbrush",
-      "🎵 Audio GEQ",
-      "🎵 Bass Rings",
-      "🎵 Freq Wave",
-      "🎵 Noise Pulse",
-      "🎵 Camp Pulse",
-      "🎵 DJ Strobe",
-      "🎵 Bass Puddles",
-      "🎵 Grav Meter",
-      // Ambient / solid (16-20)
-      "☄️ Meteor Rain",
-      "🔥 Camp Fire",
-      "💡 White Out",
-      "✨ Twinkle Night",
-      "🌈 Rainbow Walk"};
-    if (seq < 1 || seq > kBuiltinVestPresetCount) return "";
-    return kVestPresetLabels[seq - 1];
-  }
-
-  static bool isStaleBuiltinPresetLabel(const char* current) {
-    return !current || !current[0] || !std::strcmp(current, "Radar") || !std::strcmp(current, "Lines");
-  }
-
-  bool refreshBuiltinPresetLabels() {
-    JsonArray list = _state.data["preset"]["list"];
-    JsonArray labels = _state.data["preset"]["labels"];
-    bool changed = false;
-    if (!list.size()) {
-      for (uint8_t seq = 1; seq <= kBuiltinVestPresetCount; seq++) {
-        list.add(seq);
-        labels.add(builtinVestPresetLabel(seq));
-      }
-      changed = true;
-    } else {
-      while (labels.size() < list.size()) {
-        labels.add("");
-        changed = true;
-      }
-      for (size_t i = 0; i < list.size() && i < labels.size(); i++) {
-        int seq = list[i] | 0;
-        const char* current = labels[i].as<const char*>();
-        if (seq >= 1 && seq <= static_cast<int>(kBuiltinVestPresetCount)) {
-          const char* builtin = builtinVestPresetLabel(static_cast<uint8_t>(seq));
-          if (isStaleBuiltinPresetLabel(current) || (builtin[0] && std::strcmp(current, builtin) != 0)) {
-            labels[i] = builtin;
-            changed = true;
-          }
-        }
-      }
-      for (uint8_t seq = 1; seq <= kBuiltinVestPresetCount; seq++) {
-        bool found = false;
-        for (size_t i = 0; i < list.size(); i++) {
-          if ((list[i] | 0) == seq) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          list.add(seq);
-          labels.add(builtinVestPresetLabel(seq));
-          changed = true;
-        }
-      }
-      for (size_t i = 0; i + 1 < list.size(); i++) {
-        for (size_t j = i + 1; j < list.size(); j++) {
-          if ((list[j] | 0) < (list[i] | 0)) {
-            const int tmpSeq = list[i] | 0;
-            list[i] = list[j];
-            list[j] = tmpSeq;
-            if (i < labels.size() && j < labels.size()) {
-              const char* tmpLabel = labels[i];
-              labels[i] = labels[j];
-              labels[j] = tmpLabel;
-            }
-            changed = true;
-          }
-        }
-      }
-    }
-    if (changed) {
-      update([&](ModuleState& state) { return StateUpdateResult::CHANGED; }, _moduleName);
-    }
-    return changed;
-  }
-
-  void setPresetsFromFolder() {
-    const bool canScan = dmaCanOpenFile();
-    if (!canScan) {
-      EXT_LOGW(ML_TAG, "Preset folder scan skipped (largest internal %u < %u); keeping RAM cache",
-               static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-               static_cast<unsigned>(kPresetDmaMinBytes));
-      refreshBuiltinPresetLabels();
-      return;
-    }
-
-    File rootFolder = ESPFS.open("/.config/presets/");
-    const bool hadPresets = _state.data["preset"]["list"].size() || _state.data["preset"]["labels"].size();
-    _state.data["preset"]["list"].clear();
-    _state.data["preset"]["labels"].clear();
-    clearCachedPresets();
-    bool changed = hadPresets;
-    walkThroughFiles(rootFolder, [&](File folder, File file) {
-      int seq = -1;
-      if (sscanf(file.name(), "preset%02d.json", &seq) != 1) return;
-      if (seq < 1 || seq > kBuiltinVestPresetCount) return;
-      _state.data["preset"]["list"].add(seq);
-      char label[32] = "";
-      file.seek(0);
-      JsonDocument doc(JsonRAMAllocator::instance());
-      if (!deserializeJson(doc, file)) {
-        JsonArray nodes = doc["nodes"];
-        const char* nodeName = nodes.size() > 0 ? nodes[0]["name"].as<const char*>() : nullptr;
-        extractPresetDisplayLabel(label, doc["label"].as<const char*>(), nodeName);
-        cachePresetFile(seq, file, label);
-      }
-      _state.data["preset"]["labels"].add((const char*)label);
-      changed = true;
-    });
-    if (refreshBuiltinPresetLabels()) changed = true;
-    if (changed) {
-      update([&](ModuleState& state) { return StateUpdateResult::CHANGED; }, _moduleName);
     }
   }
 
@@ -839,24 +541,17 @@ class ModuleLightsControl : public Module {
   LiveScriptNode* paletteNode = nullptr;
   #endif
 
-  int selectDigNext2Preset(bool backwards) {
-    JsonArray presetList = _state.data["preset"]["list"];
-    int selected = _state.data["preset"]["selected"] | 255;
-    int firstPreset = _state.data["firstPreset"] | 1;
-    int lastPreset = _state.data["lastPreset"] | kBuiltinVestPresetCount;
-    return chooseDigNext2Preset(
-        presetList.size(), [&](size_t index) { return presetList[index].as<int>(); }, selected, firstPreset, lastPreset, backwards);
-  }
-
+#ifdef ML_WEARABLE_FIELD_BOOT
   void forceWearablePowerOn() {
     // Empty effect layers skip virtual mapping, so the compiled White Vest 95 layout stays unused.
-    if (_state.data["bootLightsOn"] | true) {
-      JsonDocument powerDoc;
-      JsonObject power = powerDoc.to<JsonObject>();
-      power["lightsOn"] = true;
+    const bool bootLightsOn = _state.data["bootLightsOn"] | true;
+    JsonDocument powerDoc;
+    JsonObject power = powerDoc.to<JsonObject>();
+    power["lightsOn"] = bootLightsOn;
+    if (bootLightsOn) {
       power["brightness"] = (uint8_t)(_state.data["bootBrightness"] | 128);
-      update(power, ModuleState::update, String("1"));  // numeric origin persists lightsOn + boot brightness
     }
+    update(power, ModuleState::update, String("1"));  // numeric origin applies power-on policy
 
     bool hasEffect = false;
     for (VirtualLayer* layer : layerP.layers) {
@@ -865,89 +560,14 @@ class ModuleLightsControl : public Module {
         break;
       }
     }
-    if (!hasEffect) {
-      extern std::vector<Module*> modules;
-      JsonDocument fxDoc;
-      JsonObject fx = fxDoc.to<JsonObject>();
-      fx["layer"] = 0;
-      fx["brightness"] = 220;
-      fx["label"] = "Wraparound Racers";
-      JsonObject node = fx["nodes"].to<JsonArray>().add<JsonObject>();
-      node["name"] = "Wraparound Racers";
-      node["on"] = true;
-      for (Module* module : modules) {
-        if (module && strcmp(module->_moduleName, "effects") == 0) {
-          module->update(fx, ModuleState::update, String("1"));
-          break;
-        }
-      }
-    }
-    setPresetsFromFolder();
+    if (!hasEffect) _presets->applyBuiltin(5, String("1"));
+    _presets->requestRefresh();
     layerP.requestMapPhysical.store(true);
     layerP.requestMapVirtual.store(true);
   }
+#endif
 
-  void applyEffectsObject(JsonObject obj, const String& originId) {
-    extern std::vector<Module*> modules;
-    for (Module* module : modules) {
-      if (module && strcmp(module->_moduleName, "effects") == 0) {
-        module->updateWithoutPropagation(obj, ModuleState::update, originId);
-        module->update([](ModuleState&) { return StateUpdateResult::CHANGED; }, originId);
-        break;
-      }
-    }
-  }
-
-  bool applyBuiltInVestPreset(uint16_t select, const String& originId) {
-    JsonDocument doc(JsonRAMAllocator::instance());
-    JsonObject fx = doc.to<JsonObject>();
-    fx["layer"] = 0;
-    fx["brightness"] = 220;
-    fx["start"]["x"] = 0; fx["start"]["y"] = 0; fx["start"]["z"] = 0;
-    fx["end"]["x"] = 100; fx["end"]["y"] = 100; fx["end"]["z"] = 100;
-    JsonObject node = fx["nodes"].to<JsonArray>().add<JsonObject>();
-    node["on"] = true;
-    const char* name = nullptr;
-    switch (select) {
-    case 1: name = "Horizon Ring"; node["controls"][0]["name"] = "bpm"; node["controls"][0]["value"] = 20; node["controls"][1]["name"] = "fade"; node["controls"][1]["value"] = 64; node["controls"][2]["name"] = "thickness"; node["controls"][2]["value"] = 2; break;
-    case 2: name = "Crossing Spiral"; node["controls"][0]["name"] = "bpm"; node["controls"][0]["value"] = 32; node["controls"][1]["name"] = "fade"; node["controls"][1]["value"] = 34; node["controls"][2]["name"] = "turns"; node["controls"][2]["value"] = 2; node["controls"][3]["name"] = "width"; node["controls"][3]["value"] = 40; break;
-    case 3: name = "Sphere Move"; fx["label"] = "Particle Sphere"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 46; break;
-    case 4: name = "Star Sky"; fx["layer"] = 1; fx["label"] = "Star Wave"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 4; node["controls"][1]["name"] = "star fill"; node["controls"][1]["value"] = 180; node["controls"][2]["name"] = "usePalette"; node["controls"][2]["value"] = true; break;
-    case 5: name = "Wraparound Racers"; node["controls"][0]["name"] = "bpm"; node["controls"][0]["value"] = 58; node["controls"][1]["name"] = "fade"; node["controls"][1]["value"] = 38; node["controls"][2]["name"] = "racers"; node["controls"][2]["value"] = 6; node["controls"][3]["name"] = "trail"; node["controls"][3]["value"] = 52; break;
-    case 6: name = "Ripples"; fx["layer"] = 1; fx["label"] = "Ripple Stars"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 50; node["controls"][1]["name"] = "interval"; node["controls"][1]["value"] = 128; break;
-    case 7: name = "Paintbrush"; fx["layer"] = 1; fx["label"] = "Audio Paintbrush"; break;
-    case 8: name = "GEQ 3D"; fx["label"] = "Audio GEQ"; break;
-    case 9: name = "Audio Rings"; fx["label"] = "Bass Rings"; node["controls"][0]["name"] = "inWards"; node["controls"][0]["value"] = true; break;
-    case 10: name = "Freq Wave"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 140; break;
-    case 11: name = "Noise Meter"; fx["label"] = "Noise Pulse"; node["controls"][0]["name"] = "fadeRate"; node["controls"][0]["value"] = 248; node["controls"][1]["name"] = "width"; node["controls"][1]["value"] = 180; break;
-    case 12: name = "Heartbeat"; fx["label"] = "Camp Pulse"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 18; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
-    case 13: name = "DJ Light"; fx["label"] = "DJ Strobe"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 220; node["controls"][1]["name"] = "candyFactory"; node["controls"][1]["value"] = true; node["controls"][2]["name"] = "fade"; node["controls"][2]["value"] = 4; break;
-    case 14: name = "Puddle Peak"; fx["label"] = "Bass Puddles"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 180; break;
-    case 15: name = "Gravimeter"; fx["label"] = "Grav Meter"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "intensity"; node["controls"][1]["value"] = 160; break;
-    case 16: name = "Meteor"; fx["label"] = "Meteor Rain"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 128; node["controls"][1]["name"] = "trail"; node["controls"][1]["value"] = 160; break;
-    case 17: name = "Fire"; fx["layer"] = 1; fx["label"] = "Camp Fire"; node["controls"][0]["name"] = "usePalette"; node["controls"][0]["value"] = true; node["controls"][1]["name"] = "flareDecay"; node["controls"][1]["value"] = 14; break;
-    case 18: name = "Solid"; fx["label"] = "White Out"; node["controls"][0]["name"] = "colorMode"; node["controls"][0]["value"] = 0; node["controls"][1]["name"] = "red"; node["controls"][1]["value"] = 255; node["controls"][2]["name"] = "green"; node["controls"][2]["value"] = 200; node["controls"][3]["name"] = "blue"; node["controls"][3]["value"] = 180; node["controls"][4]["name"] = "brightness"; node["controls"][4]["value"] = 220; break;
-    case 19: name = "Color Twinkle"; fx["label"] = "Twinkle Night"; node["controls"][0]["name"] = "fadeSpeed"; node["controls"][0]["value"] = 140; node["controls"][1]["name"] = "spawnSpeed"; node["controls"][1]["value"] = 120; break;
-    case 20: name = "Rainbow"; node["controls"][0]["name"] = "speed"; node["controls"][0]["value"] = 10; node["controls"][1]["name"] = "deltaHue"; node["controls"][1]["value"] = 7; node["controls"][2]["name"] = "usePalette"; node["controls"][2]["value"] = true; break;
-    default: return false;
-    }
-    node["name"] = name;
-    if (fx["label"].isNull()) fx["label"] = name;
-    applyEffectsObject(fx, originId);
-    return true;
-  }
-
-  void requestPreset(int select) {
-    if (select < 0) return;
-
-    JsonDocument doc(JsonRAMAllocator::instance());
-    JsonObject newState = doc.to<JsonObject>();
-    newState["preset"] = _state.data["preset"];
-    newState["preset"]["action"] = "click";
-    newState["preset"]["select"] = select;
-    update(newState, ModuleState::update, _moduleName);
-  }
-
+#ifdef ML_WEARABLE_FIELD_BOOT
   void stepDigNext2Brightness(int delta) {
     int brightness = _state.data["brightness"] | 128;
     brightness += delta;
@@ -969,10 +589,10 @@ class ModuleLightsControl : public Module {
   void handleDigNext2ButtonAction(DigNext2ButtonAction action) {
     switch (action) {
     case DigNext2ButtonAction::NextPreset:
-      requestPreset(selectDigNext2Preset(false));
+      _presets->requestPreset(_presets->selectNext(false));
       break;
     case DigNext2ButtonAction::PreviousPreset:
-      requestPreset(selectDigNext2Preset(true));
+      _presets->requestPreset(_presets->selectNext(true));
       break;
     case DigNext2ButtonAction::BrightnessStepUp:
       stepDigNext2Brightness(8);
@@ -997,52 +617,11 @@ class ModuleLightsControl : public Module {
     if (pinDigNext2Button2 != UINT8_MAX) inputs.button2 = digitalRead(pinDigNext2Button2) == LOW;
     handleDigNext2ButtonAction(updateDigNext2ButtonsPolicy(digNext2Buttons, inputs));
   }
+#endif
 
   unsigned long lastPresetTime = 0;
   // see pinPushButtonLightsOn
   static constexpr unsigned long debounceDelay = 50;  // 50ms debounce
-
-  struct PendingPresetCommand {
-    bool active = false;
-    bool copyToEffects = false;
-    bool cacheLive = false;
-    uint16_t select = 255;
-    char origin[32] = "";
-  };
-  portMUX_TYPE pendingPresetMux = portMUX_INITIALIZER_UNLOCKED;
-  PendingPresetCommand pendingPreset;
-  uint32_t lastPresetApplyMs = 0;
-  static constexpr uint32_t kMinPresetApplyGapMs = 80;
-
-  void enqueuePendingPreset(bool copyToEffects, uint16_t select, const String& origin) {
-    PendingPresetCommand cmd;
-    cmd.active = true;
-    cmd.copyToEffects = copyToEffects;
-    cmd.cacheLive = !copyToEffects;
-    cmd.select = select;
-    origin.toCharArray(cmd.origin, sizeof(cmd.origin));
-    portENTER_CRITICAL(&pendingPresetMux);
-    pendingPreset = cmd;
-    portEXIT_CRITICAL(&pendingPresetMux);
-  }
-
-  bool takePendingPreset(PendingPresetCommand& out) {
-    portENTER_CRITICAL(&pendingPresetMux);
-    if (!pendingPreset.active) {
-      portEXIT_CRITICAL(&pendingPresetMux);
-      return false;
-    }
-    out = pendingPreset;
-    pendingPreset.active = false;
-    portEXIT_CRITICAL(&pendingPresetMux);
-    return true;
-  }
-
-  void requeuePendingPreset(const PendingPresetCommand& cmd) {
-    portENTER_CRITICAL(&pendingPresetMux);
-    pendingPreset = cmd;
-    portEXIT_CRITICAL(&pendingPresetMux);
-  }
 
   unsigned long lastPushDebounceTime = 0;
   unsigned long lastToggleDebounceTime = 0;
@@ -1050,7 +629,9 @@ class ModuleLightsControl : public Module {
   int lastPushPinState = HIGH;
   int lastTogglePinState = HIGH;
   int lastPIRPinState = LOW;
+#ifdef ML_WEARABLE_FIELD_BOOT
   DigNext2ButtonRuntime digNext2Buttons;
+#endif
 #if FT_ENABLED(FT_MONITOR)
   LightsHeader lastMonitorHeader{};
   std::vector<uint8_t, VectorRAMAllocator<uint8_t>> lastMonitorPositions;
@@ -1074,31 +655,7 @@ class ModuleLightsControl : public Module {
 
   void loop20ms() override {
     Module::loop20ms();  // requestUIUpdate
-
-    PendingPresetCommand cmd;
-    if (takePendingPreset(cmd)) {
-      const uint32_t now = millis();
-      if (now - lastPresetApplyMs < kMinPresetApplyGapMs) {
-        requeuePendingPreset(cmd);
-      } else {
-        Char<32> presetFile;
-        presetFile.format("/.config/presets/preset%02d.json", cmd.select);
-        const String originId = cmd.origin;
-        if (cmd.cacheLive) cacheLiveEffectsAsPreset(cmd.select);
-        if (cmd.copyToEffects) {
-          EXT_LOGI(ML_TAG, "preset apply select=%u largestDMA=%u",
-                   cmd.select, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
-          if (!applyCachedPreset(cmd.select, originId) && !applyBuiltInVestPreset(cmd.select, originId)) {
-            EXT_LOGE(ML_TAG, "Preset %u not in RAM cache; skipped fopen", cmd.select);
-          } else {
-            g_presetApplies++;
-          }
-          lastPresetApplyMs = millis();
-        } else if (!writePresetSlotFromCache(cmd.select)) {
-          EXT_LOGW(ML_TAG, "Preset save to %s failed", presetFile.c_str());
-        }
-      }
-    }
+    _presets->process(millis());
 
     // process presetLoop
     uint8_t presetLoop = _state.data["presetLoop"];
@@ -1108,10 +665,12 @@ class ModuleLightsControl : public Module {
       // bugfix;
       //  runInAppTask.push_back([&]() {
       //  load the xth preset from FS
-      requestPreset(selectDigNext2Preset(false));
+      _presets->requestPreset(_presets->selectNext(false));
     }
 
+#ifdef ML_WEARABLE_FIELD_BOOT
     pollDigNext2Buttons(millis());
+#endif
 
     if (pinPushButtonLightsOn != UINT8_MAX) {
       if ((millis() - lastPushDebounceTime) > debounceDelay) {

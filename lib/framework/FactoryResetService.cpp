@@ -35,24 +35,38 @@ void FactoryResetService::begin()
 
 esp_err_t FactoryResetService::handleRequest(PsychicRequest *request)
 {
+    if (!clearStorage())
+    {
+        request->reply(500, "text/plain", "Factory reset failed to clear configuration storage");
+        return ESP_OK;
+    }
     request->reply(200);
-    factoryReset();
+    RestartService::restartNow();
 
     return ESP_OK;
 }
 
-/**
- * Delete function assumes that all files are stored flat, within the config directory.
- */
 void FactoryResetService::factoryReset()
 {
+    if (!clearStorage())
+    {
+        ESP_LOGE(SVK_TAG, "Factory reset failed to clear configuration storage");
+        return;
+    }
+    RestartService::restartNow();
+}
+
+bool FactoryResetService::clearStorage()
+{
+    if (_resetHook) return _resetHook();
+
     File root = fs->open(FS_CONFIG_DIRECTORY);
     File file;
     while (file = root.openNextFile())
     {
         String path = file.path();
         file.close();
-        fs->remove(path);
+        if (!fs->remove(path)) return false;
     }
-    RestartService::restartNow();
+    return true;
 }

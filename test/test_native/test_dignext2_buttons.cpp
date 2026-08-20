@@ -57,6 +57,35 @@ TEST_CASE("Dig-Next-2 both-hold toggles power") {
   CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
 }
 
+TEST_CASE("Dig-Next-2 chord suppression survives staggered release") {
+  DigNext2ButtonRuntime rt;
+  DigNext2ButtonInputs in;
+  in.lightsOn = true;
+  in.button1 = true;
+  in.button2 = true;
+
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  in.nowMs = DIG_NEXT2_BOTH_POWER_MS;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::TogglePower);
+
+  in.button1 = false;
+  in.nowMs += DIG_NEXT2_RAMP_START_MS + DIG_NEXT2_RAMP_INTERVAL_MS;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  CHECK(rt.suppressShortUntilRelease);
+
+  in.button1 = true;
+  in.nowMs += DIG_NEXT2_BOTH_POWER_MS;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  in.button1 = false;
+  in.nowMs += 10;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+
+  in.button2 = false;
+  in.nowMs += 10;
+  CHECK(updateDigNext2ButtonsPolicy(rt, in) == DigNext2ButtonAction::None);
+  CHECK_FALSE(rt.suppressShortUntilRelease);
+}
+
 TEST_CASE("Dig-Next-2 long single hold ramps brightness") {
   DigNext2ButtonRuntime rt;
   DigNext2ButtonInputs in;

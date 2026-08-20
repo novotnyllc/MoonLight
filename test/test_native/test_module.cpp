@@ -16,6 +16,8 @@
 
 #include <functional>
 
+#include "MoonBase/utilities/JsonRowRemoval.h"
+
 // ============================================================
 // Copied from Module.cpp — keep in sync with the original
 // ============================================================
@@ -247,4 +249,66 @@ TEST_CASE("settled IO state is published once after persistence loads") {
   CHECK_FALSE(inputOutput.updateWithoutPropagation(2));  // unchanged board-default pass
   CHECK_EQ(inputOutput.publishCount, 1);
   CHECK_EQ(inputOutput.publishedLedPins, 2);
+}
+
+TEST_CASE("row shrink removes every surplus row and reports every member") {
+  JsonDocument doc;
+  JsonArray rows = doc["nodes"].to<JsonArray>();
+  for (int i = 0; i < 4; i++) {
+    JsonObject row = rows.add<JsonObject>();
+    row["name"] = i;
+    row["on"] = true;
+  }
+
+  int removedNames = 0;
+  int removedMembers = 0;
+  std::string lastRemoved;
+  while (rows.size() > 1) {
+    REQUIRE(removeJsonObjectRow(rows, 1, [&](const char* key, const char*) {
+      removedMembers++;
+      lastRemoved = key;
+      if (strcmp(key, "name") == 0) removedNames++;
+    }));
+    CHECK_EQ(lastRemoved, "name");
+  }
+
+  CHECK_EQ(rows.size(), 1u);
+  CHECK_EQ(rows[0]["name"].as<int>(), 0);
+  CHECK_EQ(removedNames, 3);
+  CHECK_EQ(removedMembers, 6);
+}
+
+TEST_CASE("row shrink preserves runtime-valid rows") {
+  JsonDocument doc;
+  JsonArray rows = doc.to<JsonArray>();
+  JsonObject row = rows.add<JsonObject>();
+  row["name"] = "runtime control";
+  row["valid"] = true;
+
+  int callbacks = 0;
+  CHECK_FALSE(removeJsonObjectRow(rows, 0, [&](const char*, const char*) { callbacks++; }));
+  CHECK_EQ(rows.size(), 1u);
+  CHECK_EQ(callbacks, 0);
+}
+
+TEST_CASE("staged module state reuses one bounded spare slot") {
+  JsonDocument modulesDoc;
+  JsonArray moduleStates = modulesDoc.to<JsonArray>();
+  JsonObject activeState = moduleStates.add<JsonObject>();
+  JsonObject spareState = moduleStates.add<JsonObject>();
+
+  for (int selected = 1; selected <= 20; selected++) {
+    JsonObject previousState = activeState;
+    JsonObject stagedState = spareState;
+    stagedState.clear();
+    stagedState["selected"] = selected;
+
+    activeState = stagedState;
+    previousState.clear();
+    spareState = previousState;
+
+    REQUIRE_EQ(moduleStates.size(), 2u);
+    CHECK_EQ(activeState["selected"].as<int>(), selected);
+    CHECK_EQ(spareState.size(), 0u);
+  }
 }

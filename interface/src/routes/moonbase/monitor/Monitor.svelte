@@ -12,8 +12,6 @@
 	import { normalizePosition } from './monitor';
 	import SettingsCard from '$lib/components/SettingsCard.svelte';
 	import { socket } from '$lib/stores/socket';
-	import { user } from '$lib/stores/user';
-	import { page } from '$app/state';
 	import ControlIcon from '~icons/tabler/adjustments';
 
 	let el: HTMLCanvasElement;
@@ -21,28 +19,6 @@
 	let width = -1;
 	let height = -1;
 	let depth = -1;
-
-	//ask the server to run the mapping, the resulting positions are sent by websocket monitor
-	const requestLayout = async () => {
-		try {
-			const response = await fetch('/rest/monitorLayout', {
-				method: 'GET',
-				headers: {
-					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic',
-					'Content-Type': 'application/json'
-				}
-			});
-			if (!response.ok) throw new Error(`Monitor layout request failed: ${response.status}`);
-			await response.json();
-		} catch (error) {
-			console.error('Monitor layout request failed', error);
-		}
-	};
-
-	const handleOpen = () => {
-		isPositions = false;
-		void requestLayout();
-	};
 
 	const handleMonitor = (data: Uint8Array) => {
 		const headerPrimeNumber = 47;
@@ -148,14 +124,11 @@
 		createScene(el);
 		updateScene();
 		socket.on('monitor', handleMonitor);
-		socket.on('open', handleOpen);
-		void requestLayout();
 	});
 
 	onDestroy(() => {
 		console.log('onDestroy Monitor');
 		socket.off('monitor', handleMonitor);
-		socket.off('open', handleOpen);
 	});
 </script>
 

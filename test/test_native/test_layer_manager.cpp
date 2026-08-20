@@ -6,7 +6,7 @@
     @license   GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
 
     Native unit tests for LayerManager.
-    Tests call the real LayerManager class methods (selectLayer, prepareForPresetLoad,
+    Tests call the real LayerManager class methods (selectLayer, beginPresetReplacement,
     onNodeRemoved) via minimal stubs for the ESP32/FreeRTOS dependencies.
 
     Run with: pio test -e native
@@ -21,6 +21,7 @@
 // ---------------------------------------------------------------------------
 
 #include <ArduinoJson.h>
+#include <array>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -47,8 +48,14 @@ template <typename T>
 using VectorRAMAllocator = std::allocator<T>;
 
 // Node stub
+static int destroyedOwnedNodes = 0;
+struct VirtualLayer;
 struct Node {
+  explicit Node(bool owned = false) : owned(owned) {}
+  ~Node() { if (owned) destroyedOwnedNodes++; }
   bool on = true;
+  bool owned = false;
+  VirtualLayer* layer = nullptr;
   void requestMappings() {}
 };
 
@@ -70,19 +77,23 @@ struct VirtualLayer {
   std::vector<Node*, VectorRAMAllocator<Node*>> nodes;
   void* layerP = nullptr;
   void setup() {}
+  ~VirtualLayer() {
+    for (Node* node : nodes) {
+      if (node && node->owned) delete node;
+    }
+  }
 };
 
 // PhysicalLayer stub
 struct PhysicalLayer {
-  std::vector<VirtualLayer*> layers;
+  std::array<VirtualLayer*, 16> layers{};
+  std::vector<Node*> nodes;
   int activeLayerCount = 0;
   bool requestMapVirtual = false;
   LayerMappingMutex mappingMutex;
 
   PhysicalLayer() {
-    layers.resize(8, nullptr);
-    layers[0] = new VirtualLayer();
-    activeLayerCount = 1;
+    layers.fill(nullptr);
   }
 
   VirtualLayer* ensureLayer(uint8_t i) {
@@ -94,14 +105,22 @@ struct PhysicalLayer {
     return layers[i];
   }
 
-  ~PhysicalLayer() {
-    for (auto& l : layers) { delete l; l = nullptr; }
+  void destroyLayer(VirtualLayer*& layer) {
+    delete layer;
+    layer = nullptr;
+  }
+
+  void rebindDriverNodes(VirtualLayer* layer) {
+    for (Node* node : nodes) {
+      if (node) node->layer = layer;
+    }
   }
 
   void reset() {
-    for (auto& l : layers) { delete l; l = nullptr; }
-    layers[0] = new VirtualLayer();
-    activeLayerCount = 1;
+    for (auto& l : layers) destroyLayer(l);
+    nodes.clear();
+    activeLayerCount = 0;
+    ensureLayer(0);
     requestMapVirtual = false;
   }
 } layerP;  // global singleton (matches PhysicalLayer.cpp)
@@ -125,7 +144,7 @@ struct ModuleState {
 // ---------------------------------------------------------------------------
 #include "MoonLight/Layers/LayerManager.h"
 
-TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
+TEST_CASE("beginPresetReplacement waits for an active mapping reader") {
   layerP.reset();
   VirtualLayer* layer1 = layerP.ensureLayer(1);
 
@@ -147,8 +166,9 @@ TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
 
   std::promise<void> reconfigured;
   std::future<void> reconfiguredFuture = reconfigured.get_future();
+  LayerManager::PresetReplacementBackup backup;
   std::thread writer([&]() {
-    manager.prepareForPresetLoad();
+    manager.beginPresetReplacement(false, backup);
     reconfigured.set_value();
   });
 
@@ -159,6 +179,8 @@ TEST_CASE("prepareForPresetLoad waits for an active mapping reader") {
   reader.join();
   writer.join();
   CHECK(layerP.layers[1] == nullptr);
+  manager.rollbackPresetReplacement(backup);
+  CHECK(layerP.layers[1] == layer1);
 }
 
 TEST_CASE("shared lifetime readers overlap while writer waits and excludes new readers") {
@@ -362,6 +384,124 @@ struct Fixture {
   }
 };
 
+static size_t runtimeNodeCount() {
+  size_t count = 0;
+  for (VirtualLayer* layer : layerP.layers) {
+    if (layer) count += layer->nodes.size();
+  }
+  return count;
+}
+
+TEST_CASE("full preset replacement detaches stale layers until commit") {
+  Fixture f;
+  destroyedOwnedNodes = 0;
+  layerP.layers[0]->nodes.push_back(new Node(true));
+  layerP.ensureLayer(1)->nodes.push_back(new Node(true));
+  f.state.data["layer"] = 1;
+  addNode(f.state.data["nodes"].as<JsonArray>(), "Fire");
+  addNode(f.state.data["nodes_0"].to<JsonArray>(), "Rainbow");
+
+  LayerManager::PresetReplacementBackup backup;
+  REQUIRE(f.lm.beginPresetReplacement(false, backup));
+
+  CHECK_EQ(layerP.activeLayerCount, 1);
+  CHECK(layerP.layers[0] != nullptr);
+  CHECK(layerP.layers[1] == nullptr);
+  CHECK_EQ(runtimeNodeCount(), 0u);
+  CHECK_EQ(destroyedOwnedNodes, 0);
+  CHECK_EQ(f.state.data.size(), 0u);
+
+  f.state.data["layer"] = 0;
+  f.state.data["nodes"].to<JsonArray>();
+  NodeManager nm;
+  REQUIRE(f.lm.finishPresetReplacement(nm));
+  f.lm.commitPresetReplacement(backup);
+  CHECK_EQ(destroyedOwnedNodes, 2);
+  CHECK_EQ(layerP.activeLayerCount, 1);
+}
+
+TEST_CASE("driver nodes rebind to committed layer zero and restored layer zero") {
+  Fixture f;
+  Node driver;
+  VirtualLayer* oldLayer0 = layerP.layers[0];
+  driver.layer = oldLayer0;
+  layerP.nodes.push_back(&driver);
+
+  LayerManager::PresetReplacementBackup backup;
+  REQUIRE(f.lm.beginPresetReplacement(false, backup));
+  VirtualLayer* stagedLayer0 = layerP.layers[0];
+  REQUIRE(stagedLayer0 != oldLayer0);
+  f.lm.commitPresetReplacement(backup);
+  CHECK(driver.layer == stagedLayer0);
+
+  LayerManager::PresetReplacementBackup rollbackBackup;
+  REQUIRE(f.lm.beginPresetReplacement(false, rollbackBackup));
+  VirtualLayer* stagedRollbackLayer0 = layerP.layers[0];
+  REQUIRE(stagedRollbackLayer0 != stagedLayer0);
+  f.lm.rollbackPresetReplacement(rollbackBackup);
+  CHECK(layerP.layers[0] == stagedLayer0);
+  CHECK(driver.layer == stagedLayer0);
+}
+
+TEST_CASE("failed preset replacement restores the exact prior topology") {
+  Fixture f;
+  destroyedOwnedNodes = 0;
+  VirtualLayer* oldLayer0 = layerP.layers[0];
+  VirtualLayer* oldLayer2 = layerP.ensureLayer(2);
+  Node* oldNode0 = new Node(true);
+  Node* oldNode2 = new Node(true);
+  oldLayer0->nodes.push_back(oldNode0);
+  oldLayer2->nodes.push_back(oldNode2);
+  f.lm.selectLayer(2, false);
+
+  LayerManager::PresetReplacementBackup backup;
+  REQUIRE(f.lm.beginPresetReplacement(false, backup));
+  layerP.layers[0]->nodes.push_back(new Node(true));
+  addNode(f.state.data["nodes_1"].to<JsonArray>(), "Unknown");
+  NodeManager nm;
+  CHECK_FALSE(f.lm.finishPresetReplacement(nm));
+  f.lm.rollbackPresetReplacement(backup);
+
+  CHECK(layerP.layers[0] == oldLayer0);
+  CHECK(layerP.layers[2] == oldLayer2);
+  CHECK_EQ(f.lm.getSelectedLayer(), 2);
+  CHECK_EQ(layerP.activeLayerCount, 2);
+  CHECK((*f.nodesVec)[0] == oldNode2);
+  CHECK_EQ(destroyedOwnedNodes, 1);
+}
+
+TEST_CASE("two catalog laps keep layer and node ownership at the current preset only") {
+  Fixture f;
+  NodeManager nm;
+  const uint8_t layerOnePresets[] = {4, 6, 7, 17};
+  destroyedOwnedNodes = 0;
+  int createdNodes = 0;
+
+  for (int lap = 0; lap < 2; lap++) {
+    for (uint8_t preset = 1; preset <= 20; preset++) {
+      bool layerOne = false;
+      for (uint8_t candidate : layerOnePresets) layerOne = layerOne || candidate == preset;
+
+      LayerManager::PresetReplacementBackup backup;
+      REQUIRE(f.lm.beginPresetReplacement(false, backup));
+      if (layerOne) f.lm.selectLayer(1, false);
+      layerP.layers[layerOne ? 1 : 0]->nodes.push_back(new Node(true));
+      createdNodes++;
+      f.state.data["layer"] = layerOne ? 1 : 0;
+      f.state.data["nodes"].to<JsonArray>();
+      REQUIRE(f.lm.finishPresetReplacement(nm));
+      f.lm.commitPresetReplacement(backup);
+
+      CHECK_EQ(runtimeNodeCount(), 1u);
+      CHECK_EQ(destroyedOwnedNodes, createdNodes - 1);
+      CHECK_EQ(layerP.activeLayerCount, layerOne ? 2 : 1);
+    }
+    CHECK_EQ(f.lm.getSelectedLayer(), 0u);
+    CHECK_EQ(layerP.activeLayerCount, 1);
+    CHECK_EQ(runtimeNodeCount(), 1u);
+  }
+}
+
 static UpdatedItem updateFrom(JsonDocument& doc, const char* name) {
   UpdatedItem item;
   item.name = name;
@@ -398,7 +538,9 @@ TEST_CASE("legacy restore ignores bare controls only while canonical layer state
   // A prior canonical preset must not make a following legacy preset look canonical.
   f.state.data["brightness_0"] = 77;
   f.state.data["start_0"]["x"] = 12;
-  f.lm.prepareForPresetLoad();
+  LayerManager::PresetReplacementBackup backup;
+  REQUIRE(f.lm.beginPresetReplacement(true, backup));
+  f.lm.commitPresetReplacement(backup);
   CHECK(f.state.data["brightness_0"].isNull());
   CHECK(f.state.data["start_0"].isNull());
 
@@ -413,6 +555,12 @@ TEST_CASE("legacy restore ignores bare controls only while canonical layer state
   CHECK(f.lm.handleUpdate(updateFrom(legacyStart, "start")));
   CHECK_EQ(layerP.layers[0]->startPct.x, 0);
   CHECK(f.state.data["start_0"].isNull());
+
+  JsonDocument legacyEnd;
+  legacyEnd["x"] = 84; legacyEnd["y"] = 84; legacyEnd["z"] = 1;
+  CHECK(f.lm.handleUpdate(updateFrom(legacyEnd, "end")));
+  CHECK_EQ(layerP.layers[0]->endPct.x, 100);
+  CHECK(f.state.data["end_0"].isNull());
 }
 
 TEST_CASE("canonical persisted controls still apply during the restore window") {
@@ -487,97 +635,6 @@ TEST_CASE("selectLayer(i, swapState=false) does not touch nodes JSON") {
 
   CHECK_EQ(f.state.data["nodes"].as<JsonArray>().size(), before);
   CHECK_EQ(f.lm.getSelectedLayer(), 1u);
-}
-
-// ---------------------------------------------------------------------------
-// prepareForPresetLoad — clear non-selected layers
-// ---------------------------------------------------------------------------
-
-TEST_CASE("prepareForPresetLoad clears non-zero layer state keys") {
-  Fixture f;
-
-  // Set up: layers 1 and 2 exist with persisted state
-  layerP.ensureLayer(1);
-  layerP.ensureLayer(2);
-  addNode(f.state.data["nodes_1"].to<JsonArray>(), "Fire");
-  f.state.data["start_1"]["x"]  = 0;
-  f.state.data["end_1"]["x"]    = 50;
-  f.state.data["brightness_1"]  = 180;
-  addNode(f.state.data["nodes_2"].to<JsonArray>(), "Rainbow");
-  f.state.data["brightness_2"]  = 200;
-
-  f.lm.prepareForPresetLoad();
-
-  // All non-zero layer keys must be gone
-  CHECK(f.state.data["nodes_1"].isNull());
-  CHECK(f.state.data["start_1"].isNull());
-  CHECK(f.state.data["end_1"].isNull());
-  CHECK(f.state.data["brightness_1"].isNull());
-  CHECK(f.state.data["nodes_2"].isNull());
-  CHECK(f.state.data["brightness_2"].isNull());
-}
-
-TEST_CASE("prepareForPresetLoad resets layer 0 bounds to defaults") {
-  Fixture f;
-
-  // Simulate stale bounds from a previous preset
-  layerP.layers[0]->startPct = {10, 20, 0};
-  layerP.layers[0]->endPct   = {80, 90, 100};
-  layerP.layers[0]->brightness = 100;
-  f.state.data["start"]["x"] = 10;
-  f.state.data["end"]["x"]   = 80;
-
-  f.lm.prepareForPresetLoad();
-
-  CHECK_EQ(layerP.layers[0]->startPct.x, 0);
-  CHECK_EQ(layerP.layers[0]->endPct.x, 100);
-  CHECK_EQ(layerP.layers[0]->brightness, 255);
-  // Flat "start"/"end" keys must be removed so old presets don't bleed through
-  CHECK(f.state.data["start"].isNull());
-  CHECK(f.state.data["end"].isNull());
-}
-
-// ---------------------------------------------------------------------------
-// prepareForPresetLoad — regression: selectedLayer > 0
-//
-// Bug: when selectedLayer was > 0 at preset-switch time, data["nodes"] still
-// held the stale layer-N nodes after selectLayer(0, false).  compareRecursive
-// then diffed the new preset against those stale nodes and could skip node
-// recreation if they matched the just-destroyed nodes.
-// Fix: call layerStateLoad(data, 0) to overwrite data["nodes"] with layer 0.
-// ---------------------------------------------------------------------------
-
-TEST_CASE("prepareForPresetLoad regression: selectedLayer>0 reloads layer-0 nodes") {
-  Fixture f;
-
-  // Simulate: user is on layer 1 (Fire running), layer 0 has Gradient saved
-  addNode(f.state.data["nodes_0"].to<JsonArray>(), "Gradient");
-  f.lm.selectLayer(1, /*swapState=*/false);  // move to layer 1 without JSON swap
-
-  // Manually put Fire into data["nodes"] (as if it had been running on layer 1)
-  addNode(f.state.data["nodes"].as<JsonArray>(), "Fire");
-  f.state.data["layer"] = 1;
-
-  f.lm.prepareForPresetLoad();  // selectedLayer was 1
-
-  // data["nodes"] must now reflect layer 0 (Gradient), not the stale layer-1 Fire
-  CHECK(nodesHas(f.state.data, "Gradient"));
-  CHECK_FALSE(nodesHas(f.state.data, "Fire"));
-  CHECK_EQ(f.lm.getSelectedLayer(), 0u);
-}
-
-TEST_CASE("prepareForPresetLoad regression: no nodes_0 saved → nodes is empty") {
-  Fixture f;
-
-  // User was on layer 1, nodes_0 was never saved (e.g. first boot)
-  f.lm.selectLayer(1, false);
-  addNode(f.state.data["nodes"].as<JsonArray>(), "StaleEffect");
-
-  f.lm.prepareForPresetLoad();
-
-  JsonArray nodes = f.state.data["nodes"].as<JsonArray>();
-  REQUIRE_FALSE(nodes.isNull());
-  CHECK_EQ(nodes.size(), 0u);  // must clear stale nodes, not keep them
 }
 
 // ---------------------------------------------------------------------------

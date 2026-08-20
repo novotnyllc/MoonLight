@@ -27,6 +27,37 @@ class ModuleEffects : public NodeManager {
   ModuleLightsControl* _moduleLightsControl;
   LayerManager layerMgr;
 
+ private:
+  mutable bool presetReplacementBuilding = false;
+  mutable bool presetBuildFailed = false;
+  JsonObject presetSpareState;
+
+  static bool presetNodeDocumentsValid(JsonObject data) {
+    for (JsonPair item : data) {
+      const char* key = item.key().c_str();
+      if (strcmp(key, "nodes") != 0 && strncmp(key, "nodes_", 6) != 0) continue;
+      if (!item.value().is<JsonArray>()) return false;
+      for (JsonVariant node : item.value().as<JsonArray>()) {
+        const char* name = node["name"];
+        if (!name || !name[0]) return false;
+      }
+    }
+    return true;
+  }
+
+  void activateDeferredLiveScripts() {
+  #if FT_LIVESCRIPT
+    for (VirtualLayer* layer : layerP.layers) {
+      if (!layer) continue;
+      for (Node* node : layer->nodes) {
+        if (node && node->isLiveScriptNode()) static_cast<LiveScriptNode*>(node)->activateDeferredSetup();
+      }
+    }
+  #endif
+  }
+
+ public:
+
   ModuleEffects(PsychicHttpServer* server, ESP32SvelteKit* sveltekit, FileManager* fileManager, ModuleLightsControl* moduleLightsControl) : NodeManager("effects", server, sveltekit, fileManager) {
     EXT_LOGV(ML_TAG, "constructor");
     _moduleLightsControl = moduleLightsControl;
@@ -35,7 +66,10 @@ class ModuleEffects : public NodeManager {
   void begin() override {
     defaultNodeName = safeModeMB ? getNameAndTags<SolidEffect>() : getNameAndTags<RandomEffect>();
     layerMgr.init(_state, nodes, requestUIUpdate);
-    layerMgr.selectLayer(0, false);  // initial setup, no state to swap yet
+    if (!layerMgr.selectLayer(0, false)) {  // initial setup, no state to swap yet
+      EXT_LOGE(ML_TAG, "Failed to allocate required VirtualLayer 0; effects module disabled");
+      return;
+    }
     NodeManager::begin();
     layerMgr.scheduleRestore();
 
@@ -95,6 +129,56 @@ class ModuleEffects : public NodeManager {
   #endif
 
   bool shouldLoadPersistedState() const override { return !safeModeMB; }
+
+  StateUpdateResult replaceFullState(JsonObject& newData, const String& originId, bool persistedState = false) override {
+    if (newData.size() == 0 || !presetNodeDocumentsValid(newData)) return StateUpdateResult::ERROR;
+    return updateWithoutPropagation(
+        [&](ModuleState& state) {
+          LayerMappingGuard guard(layerP.mappingMutex);
+          const int targetLayer = newData["layer"].isNull() ? 0 : newData["layer"].as<int>();
+          if (targetLayer < 0 || static_cast<size_t>(targetLayer) >= layerP.layers.size() || !gModulesDoc) return StateUpdateResult::ERROR;
+
+          JsonObject previousState = state.data;
+          if (presetSpareState.isNull()) presetSpareState = gModulesDoc->as<JsonArray>().add<JsonObject>();
+          JsonObject stagedState = presetSpareState;
+          if (stagedState.isNull()) return StateUpdateResult::ERROR;
+          stagedState.clear();
+          state.data = stagedState;
+
+          LayerManager::PresetReplacementBackup backup;
+          presetBuildFailed = false;
+          presetReplacementBuilding = true;
+          if (!layerMgr.beginPresetReplacement(persistedState, backup) || !layerMgr.selectLayer(static_cast<uint8_t>(targetLayer), false)) {
+            presetReplacementBuilding = false;
+            layerMgr.rollbackPresetReplacement(backup);
+            state.data = previousState;
+            stagedState.clear();
+            presetSpareState = stagedState;
+            return StateUpdateResult::ERROR;
+          }
+
+          StateUpdateResult result = ModuleState::update(newData, state, originId);
+          bool complete = result != StateUpdateResult::ERROR && !presetBuildFailed && layerMgr.finishPresetReplacement(*this);
+          presetReplacementBuilding = false;
+          if (!complete || presetBuildFailed) {
+            layerMgr.rollbackPresetReplacement(backup);
+            state.data = previousState;
+            stagedState.clear();
+            presetSpareState = stagedState;
+            return StateUpdateResult::ERROR;
+          }
+
+          layerMgr.commitPresetReplacement(backup);
+          // LiveScript uses a shared runtime keyed by animation name. Start a
+          // staged script only after old nodes (including a same-name script)
+          // have been destroyed, so rollback never mutates the active runtime.
+          activateDeferredLiveScripts();
+          previousState.clear();
+          presetSpareState = previousState;
+          return result;
+        },
+        originId);
+  }
 
   void setupDefinition(const JsonArray& controls) override {
     EXT_LOGV(ML_TAG, "");
@@ -354,10 +438,12 @@ class ModuleEffects : public NodeManager {
     if (!node) node = checkAndAlloc<RippleXZModifier>(name);
 
   #if FT_LIVESCRIPT
-    if (!node && !safeModeMB) {
+    if (!node && !safeModeMB && ESPFS.exists(name)) {
       LiveScriptNode* liveScriptNode = allocMBObject<LiveScriptNode>();
-      liveScriptNode->animation = name;  // set the (file)name of the script
-      node = liveScriptNode;
+      if (liveScriptNode) {
+        liveScriptNode->animation = name;  // set the (file)name of the script
+        node = liveScriptNode;
+      }
     }
   #endif
 
@@ -365,11 +451,21 @@ class ModuleEffects : public NodeManager {
       EXT_LOGI(ML_TAG, "Add %s (p:%p pr:%d)", name, node, isInPSRAM(node));
 
       VirtualLayer* layer = layerP.ensureLayer(layerMgr.getSelectedLayer());
+      if (!layer) {
+        freeMBObject(node);
+        if (presetReplacementBuilding) presetBuildFailed = true;
+        return nullptr;
+      }
       node->constructor(layer, controls, &layerP.effectsMutex);  // pass the selected layer to the node
       node->moduleControl = _moduleLightsControl;                // to access global lights control functions if needed
       // node->moduleIO = _moduleIO;                     // to get pin allocations
       node->moduleNodes = (Module*)this;  // cppcheck-suppress dangerousTypeCast -- upcast; to request UI update
-      node->setup();                      // run the setup of the effect
+    #if FT_LIVESCRIPT
+      if (presetReplacementBuilding && node->isLiveScriptNode())
+        static_cast<LiveScriptNode*>(node)->deferSetup();
+      else
+    #endif
+        node->setup();                    // run the setup of the effect
       node->onSizeChanged(Coord3D());   // to init memory allocations
 
       // from here it runs concurrently in the effects task
@@ -379,15 +475,13 @@ class ModuleEffects : public NodeManager {
         layer->nodes[index] = node;  // add the node to the layer
     }
 
+    if (!node && presetReplacementBuilding) presetBuildFailed = true;
+
     return node;
   }
 
   void onNodeRemoved() override {
     layerMgr.onNodeRemoved();
-  }
-
-  void onBeforeStateLoad() override {
-    layerMgr.prepareForPresetLoad();
   }
 
   void loop20ms() override {

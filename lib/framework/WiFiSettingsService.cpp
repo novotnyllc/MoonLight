@@ -15,7 +15,6 @@
 #include <WiFiSettingsService.h>
 
 #include <ESP32SvelteKit.h> // 🌙 safeMode
-#include <MdnsRegistrationPolicy.h>
 #if FT_ENABLED(FT_ETHERNET)
 #include <ETH.h> // 🌙 ETH.connected() check in manageSTA()
 #endif
@@ -281,8 +280,7 @@ bool sendAnalytics() {
 void WiFiSettingsService::loop()
 {
     unsigned long currentMillis = millis();
-    // mDNS start/retry/announce lives in ESP32SvelteKit::maintainMdns().
-    // This loop used to call mdns_netif_action even when MDNS.begin() failed.
+    // ESP32SvelteKit only retries a failed mDNS begin; ESPmDNS owns Wi-Fi/IP events.
 
     // Handle delayed reconnection
     if (_delayedReconnectPending && currentMillis >= _delayedReconnectTime)

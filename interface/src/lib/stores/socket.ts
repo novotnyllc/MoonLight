@@ -19,6 +19,10 @@ export function createWebSocket() {
 		connect();
 	}
 
+	function reopen() {
+		if (socketUrl) connect();
+	}
+
 	function disconnect(socket: WebSocket, socketGeneration: number, reason: SocketEvent, event?: Event) {
 		if (ws !== socket || generation !== socketGeneration) return;
 		//console.log('disconnect', reason, event);
@@ -178,6 +182,7 @@ export function createWebSocket() {
 		send,
 		sendEvent,
 		init,
+		reopen,
 		close,
 		on: <T>(event: string, listener: (data: T) => void): (() => void) => {
 			let eventListeners = listeners.get(event);

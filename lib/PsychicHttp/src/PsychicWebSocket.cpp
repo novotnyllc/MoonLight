@@ -1,7 +1,28 @@
 #include "PsychicWebSocket.h"
 
+#include <esp_heap_caps.h>
+#include <limits>
+
 namespace {
   const char* const PSYCHIC_WS_URI_SESSION_KEY = "psychic.ws.uri";
+
+  struct QueuedWebSocketFrame {
+    httpd_handle_t server;
+    int socket;
+    httpd_ws_frame_t frame;
+  };
+
+  void queuedWebSocketSend(void* arg) {
+    auto* queued = static_cast<QueuedWebSocketFrame*>(arg);
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (httpd_ws_get_fd_info(queued->server, queued->socket) == HTTPD_WS_CLIENT_WEBSOCKET) {
+      err = httpd_ws_send_frame_async(queued->server, queued->socket, &queued->frame);
+    }
+    if (err != ESP_OK) {
+      ESP_LOGW(PH_TAG, "Queued WebSocket send failed for fd=%d (%s)", queued->socket, esp_err_to_name(err));
+    }
+    heap_caps_free(queued);
+  }
 }
 
 /*************************************/
@@ -61,20 +82,39 @@ PsychicWebSocketClient::~PsychicWebSocketClient() {
 
 esp_err_t PsychicWebSocketClient::sendMessage(httpd_ws_frame_t * ws_pkt)
 {
+  if (!ws_pkt || (ws_pkt->len && !ws_pkt->payload) ||
+      ws_pkt->len > std::numeric_limits<size_t>::max() - sizeof(QueuedWebSocketFrame)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
   // 🌙
-  // Guard: check socket is still a valid active WebSocket before sending.
-  // Without this, httpd_ws_send_frame_async can propagate into lwIP and hard-assert
-  // when the underlying netconn is in an invalid/closed state.
+  // Guard before handing the frame to HTTPD's work queue.
   httpd_ws_client_info_t info = httpd_ws_get_fd_info(this->server(), this->socket());
   if (info != HTTPD_WS_CLIENT_WEBSOCKET) {
     ESP_LOGD(PH_TAG, "underlying netconn is in an invalid/closed state.");
     return ESP_FAIL;
   }
-  esp_err_t ret = httpd_ws_send_frame_async(this->server(), this->socket(), ws_pkt);
-  if (ret != ESP_OK)
-  {
-    ESP_LOGW(PH_TAG, "WebSocket send failed for fd=%d (%s); closing session", this->socket(), esp_err_to_name(ret));
-    close();
+
+  const size_t allocationSize = sizeof(QueuedWebSocketFrame) + ws_pkt->len;
+  auto* queued = static_cast<QueuedWebSocketFrame*>(heap_caps_malloc_prefer(
+      allocationSize, 2,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!queued) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  queued->frame = *ws_pkt;
+  queued->server = this->server();
+  queued->socket = this->socket();
+  if (ws_pkt->len) {
+    queued->frame.payload = reinterpret_cast<uint8_t*>(queued + 1);
+    memcpy(queued->frame.payload, ws_pkt->payload, ws_pkt->len);
+  }
+
+  esp_err_t ret = httpd_queue_work(this->server(), queuedWebSocketSend, queued);
+  if (ret != ESP_OK) {
+    heap_caps_free(queued);
   }
   return ret;
 } 

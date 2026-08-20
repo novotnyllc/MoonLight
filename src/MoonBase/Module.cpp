@@ -12,6 +12,7 @@
 #if FT_MOONBASE == 1
 
   #include "Module.h"
+  #include "utilities/JsonRowRemoval.h"
 
 JsonDocument* gModulesDoc = nullptr;
 
@@ -196,12 +197,13 @@ bool ModuleState::compareRecursive(const JsonString& parent, const JsonVariant& 
 
           // EXT_LOGD(MB_TAG, "compare %s[%d] %s = %s -> %s", parent.c_str(), index, key.c_str(), stateValue.as<const char*>(), newValue.as<const char*>());
 
-          for (int i = 0; i < MAX(stateArray.size(), newArray.size()); i++) {  // compare each item in the array
+          for (int i = 0; i < MAX(stateArray.size(), newArray.size());) {  // compare each item in the array
             // EXT_LOGD(MB_TAG, "compare %s[%d] %s = %s -> %s", parent.c_str(), index, key.c_str(), stateArray[i].as<const char*>(), newArray[i].as<const char*>());
             if (i >= stateArray.size()) {  // newArray has added a row
               // EXT_LOGD(MB_TAG, "add %s.%s[%d] (%d/%d) d: %d", parent.c_str(), key.c_str(), i, stateArray.size(), newArray.size(), depth);
               stateArray.add<JsonObject>();  // add new row
               changed = compareRecursive(key, stateArray[i], newArray[i], updatedItem, originId, depth + 1, i) || changed;
+              i++;
             } else if (i >= newArray.size()) {  // newArray has deleted a row
               changed = true;                   // compareRecursive(key, stateArray[i], newArray[i], updatedItem, depth+1, i) || changed;
 
@@ -215,24 +217,20 @@ bool ModuleState::compareRecursive(const JsonString& parent, const JsonVariant& 
               }
               // Node controls need not to be removed if they just have been added by Node::addControl via Nodemanager.h - which sets a valid status to a control
               // Don't remove array items marked as valid (e.g., controls added in setup() that don't exist in persisted state yet)
-              bool isValid = !stateArray[i]["valid"].isNull() && stateArray[i]["valid"].as<bool>();
-              if (!isValid) {
-                for (JsonPair control : stateArray[i].as<JsonObject>()) {
-                  updatedItem.name = control.key();
-                  updatedItem.oldValue = control.value();
-                  updatedItem.value = JsonVariant();    // Assign an empty JsonVariant
-                  stateArray[i].remove(control.key());  // remove the control from the state row so onUpdate see it as empty
-
-                  updatedItem.originId = &originId;
-                  processUpdatedItem(updatedItem);
-                }
-
-                stateArray.remove(i);  // remove the state row entirely
-              } else {
+              bool removed = removeJsonObjectRow(stateArray, i, [&](const char* key, const char* oldValue) {
+                updatedItem.name = key;
+                updatedItem.oldValue = oldValue;
+                updatedItem.value = JsonVariant();
+                updatedItem.originId = &originId;
+                processUpdatedItem(updatedItem);
+              });
+              if (!removed) {
                 EXT_LOGD(MB_TAG, "skip remove %s.%s[%d] d: %d", parent.c_str(), key.c_str(), i, depth);
+                i++;
               }
             } else {  // row already exists
               changed = compareRecursive(key, stateArray[i], newArray[i], updatedItem, originId, depth + 1, i) || changed;
+              i++;
             }
           }  // loop over array
         }  // identifyingFieldFound
