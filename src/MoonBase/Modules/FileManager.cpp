@@ -44,6 +44,7 @@ void addFolder(File folder, bool showHidden, const JsonArray& fileArray) {
         // serializeJson(fileObject, Serial);
       }
       file.close();
+      vTaskDelay(1);
     }
   }
 }

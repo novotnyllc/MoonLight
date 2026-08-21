@@ -30,3 +30,35 @@ TEST_CASE("safe mode saves are rejected before persistence drains") {
   checkRoute("/rest/saveConfig");
   checkRoute("/rest/saveGolden");
 }
+
+TEST_CASE("FileManager inventory yields and has no backup scan route") {
+  std::ifstream source("src/MoonBase/Modules/FileManager.cpp");
+  REQUIRE(source.good());
+
+  const std::string text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+  CHECK(text.find("/rest/FileManagerBackup") == std::string::npos);
+
+  const size_t close = text.find("file.close();");
+  REQUIRE(close != std::string::npos);
+  const size_t yield = text.find("vTaskDelay(1);", close);
+  REQUIRE(yield != std::string::npos);
+  CHECK(close < yield);
+}
+
+TEST_CASE("successful HTTP chunks yield before the next chunk") {
+  std::ifstream source("lib/PsychicHttp/src/PsychicResponse.cpp");
+  REQUIRE(source.good());
+
+  const std::string text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+  const size_t send = text.find("esp_err_t err = httpd_resp_send_chunk");
+  REQUIRE(send != std::string::npos);
+  const size_t success = text.find("if (err == ESP_OK)", send);
+  const size_t yield = text.find("vTaskDelay(1);", success);
+  const size_t failure = text.find("if (err != ESP_OK)", send);
+  REQUIRE(success != std::string::npos);
+  REQUIRE(yield != std::string::npos);
+  REQUIRE(failure != std::string::npos);
+  CHECK(send < success);
+  CHECK(success < yield);
+  CHECK(yield < failure);
+}

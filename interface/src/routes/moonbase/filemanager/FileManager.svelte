@@ -10,210 +10,250 @@
 -->
 
 <script lang="ts">
-	import { modals } from 'svelte-modals';
 	import { user } from '$lib/stores/user';
 	import { page } from '$app/state';
 	import { notifications } from '$lib/components/toasts/notifications';
 	import SettingsCard from '$lib/components/SettingsCard.svelte';
-	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
-	import Spinner from '$lib/components/Spinner.svelte';
 	import FilesIcon from '~icons/tabler/files';
-	import FileIcon from '~icons/tabler/file';
-	import FolderIcon from '~icons/tabler/folder';
-	import Add from '~icons/tabler/circle-plus';
-	import Edit from '~icons/tabler/pencil';
-	import Delete from '~icons/tabler/trash';
-	import Cancel from '~icons/tabler/x';
-	import type { FilesState } from '$lib/types/moonbase_models';
-	import { onMount, onDestroy } from 'svelte';
-	import { socket } from '$lib/stores/socket';
-	import FileEditWidget from '$lib/components/moonbase/FileEditWidget.svelte';
 	import Help from '~icons/tabler/help';
-	import Api from '~icons/tabler/api'; // 🌙
-	import FieldRenderer from '$lib/components/moonbase/FieldRenderer.svelte';
+	import Download from '~icons/tabler/download';
+	import Upload from '~icons/tabler/upload';
+	import {
+		collectBackupDirectories,
+		createConfigBackup,
+		decodeBackupTextForFileManager,
+		discoverBackupScriptPaths,
+		getBackupProbePaths,
+		getBackupCloneWarnings,
+		getBackupHostname,
+		parseConfigBackup,
+		sha256Hex,
+		validateBackupHostname,
+		withBackupHostname,
+		type BackupFile
+	} from './configBackup';
 
-	let filesState: FilesState = $state({
-		name: '',
-		path: '',
-		isFile: false,
-		size: 0,
-		time: 0,
-		contents: '',
-		files: [],
-		fs_total: 0,
-		fs_used: 0,
-		showHidden: false
-	});
-	let folderList: FilesState[] = $state([]); //all files in a folder
-	let editableFile: FilesState = $state({
-		name: '',
-		path: '',
-		isFile: true,
-		size: 0,
-		time: 0,
-		contents: '',
-		files: [],
-		fs_total: 0,
-		fs_used: 0,
-		showHidden: false
-	});
-	let breadCrumbs: string[] = $state([]);
+	let backupBusy = $state(false);
+	let backupFileInput: HTMLInputElement = $state()!;
 
-	let path: string = $state('');
-
-	async function getState() {
-		try {
-			const response = await fetch('/rest/FileManager', {
-				method: 'GET',
-				headers: {
-					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic',
-					'Content-Type': 'application/json'
-				}
-			});
-			filesState = await response.json();
-			// console.log("filesState", filesState);
-		} catch (error) {
-			console.error('Error:', error);
-		}
-		folderListFromBreadCrumbs();
-		return filesState;
+	function authHeaders(contentType?: string) {
+		return {
+			Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic',
+			...(contentType ? { 'Content-Type': contentType } : {})
+		};
 	}
 
-	async function postFilesState(data: Record<string, unknown>) {
-		//export needed to call from other components
-		try {
-			const response = await fetch('/rest/FileManager', {
-				method: 'POST',
-				headers: {
-					Authorization: page.data.features.security ? 'Bearer ' + $user.bearer_token : 'Basic',
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify(data)
-			});
-			if (response.status == 200) {
-				notifications.success('Settings updated.', 3000);
-				filesState = await response.json();
-			} else {
-				notifications.error('User not authorized.', 3000);
-			}
-		} catch (error) {
-			console.error('Error:', error);
-		}
-	}
-
-	function openFileEditor(isNew: boolean, isFile: boolean, filePath: string) {
-		modals.open(FileEditWidget as any, {
-			newItem: isNew,
-			isFile: isFile,
-			path: filePath
+	async function postFileManager(data: Record<string, unknown>) {
+		const response = await fetch('/rest/FileManager', {
+			method: 'POST',
+			headers: authHeaders('application/json'),
+			body: JSON.stringify(data)
 		});
+		if (!response.ok) throw new Error(`File Manager returned HTTP ${response.status}`);
 	}
 
-	function addFile() {
-		console.log('addFile');
-		path = '/' + breadCrumbs.join('/');
-		openFileEditor(true, true, path);
-	}
-	function addFolder() {
-		console.log('addFolder');
-		path = '/' + breadCrumbs.join('/');
-		openFileEditor(true, false, path);
+	async function getFilesystemUsage() {
+		const response = await fetch('/rest/systemStatus', {
+			headers: authHeaders(),
+			cache: 'no-store'
+		});
+		if (!response.ok) throw new Error(`System status returned HTTP ${response.status}`);
+		const status = (await response.json()) as { fs_total?: unknown; fs_used?: unknown };
+		if (typeof status.fs_total !== 'number' || typeof status.fs_used !== 'number') {
+			throw new Error('System status did not include filesystem usage');
+		}
+		return { total: status.fs_total, used: status.fs_used };
 	}
 
-	function folderListFromBreadCrumbs() {
-		folderList = filesState.files;
-		for (let indexF = 0; indexF < breadCrumbs.length; indexF++) {
-			//find the parent folder
-			let found = false;
-			for (let indexI = 0; indexI < folderList.length; indexI++) {
-				if (folderList[indexI].name === breadCrumbs[indexF]) {
-					// console.log("handleEdit parent", folderList[indexI], breadCrumbs[indexF])
-					folderList = [folderList[indexI], ...folderList[indexI].files];
-					found = true;
-				}
+	function fileUrl(filePath: string) {
+		return '/rest/file/' + filePath.slice(1).split('/').map(encodeURIComponent).join('/');
+	}
+
+	async function probeFile(filePath: string): Promise<BackupFile | null> {
+		const response = await fetch(fileUrl(filePath), {
+			headers: authHeaders(),
+			cache: 'no-store'
+		});
+		if (response.status === 404) return null;
+		if (!response.ok) throw new Error(`Could not read ${filePath} (HTTP ${response.status})`);
+		return { path: filePath, bytes: new Uint8Array(await response.arrayBuffer()) };
+	}
+
+	async function probeFiles(paths: string[]): Promise<BackupFile[]> {
+		const files: BackupFile[] = [];
+		for (const path of paths) {
+			const file = await probeFile(path);
+			if (file) files.push(file);
+		}
+		return files;
+	}
+
+	function downloadBlob(blob: Blob, filename: string) {
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = filename;
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		URL.revokeObjectURL(url);
+	}
+
+	async function exportConfigBackup() {
+		if (backupBusy) return;
+		backupBusy = true;
+		try {
+			const saved = await fetch('/rest/saveConfig', { method: 'POST', headers: authHeaders() });
+			if (!saved.ok) throw new Error(`Could not flush live configuration (HTTP ${saved.status})`);
+			const files = await probeFiles(getBackupProbePaths());
+			const existingPaths = new Set(files.map((file) => file.path));
+			files.push(
+				...(await probeFiles(
+					discoverBackupScriptPaths(files).filter((path) => !existingPaths.has(path))
+				))
+			);
+			downloadBlob(
+				await createConfigBackup(files),
+				`moonlight-config-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`
+			);
+			notifications.success(`Exported ${files.length} files.`, 4000);
+		} catch (error) {
+			console.error('Configuration export failed:', error);
+			notifications.error(
+				`Configuration export failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+				6000
+			);
+		} finally {
+			backupBusy = false;
+		}
+	}
+
+	function fileName(filePath: string) {
+		return filePath.slice(filePath.lastIndexOf('/') + 1);
+	}
+
+	async function readFileBytes(filePath: string) {
+		const response = await fetch(fileUrl(filePath), { headers: authHeaders(), cache: 'no-store' });
+		if (!response.ok) throw new Error(`Could not read ${filePath} (HTTP ${response.status})`);
+		return new Uint8Array(await response.arrayBuffer());
+	}
+
+	async function importConfigBackup(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const selected = input.files?.[0];
+		input.value = '';
+		if (!selected || backupBusy) return;
+		backupBusy = true;
+		try {
+			const backup = await parseConfigBackup(selected);
+			let restoreFiles = backup.files;
+			const savedHostname = getBackupHostname(restoreFiles);
+			let restoreHostname = savedHostname;
+			if (savedHostname) {
+				const requestedHostname = window.prompt(
+					'Device hostname for this restore. Keep the saved name for a replacement board, or change the full name for a second online board to avoid mDNS and group-sync conflicts.',
+					savedHostname
+				);
+				if (requestedHostname === null) return;
+				restoreHostname = validateBackupHostname(requestedHostname);
+				restoreFiles = withBackupHostname(restoreFiles, restoreHostname);
 			}
-			if (!found) {
-				//e.g. old coookie, reset
-				breadCrumbs = [];
-				folderList = filesState.files;
+			const cloneWarnings =
+				savedHostname && restoreHostname
+					? getBackupCloneWarnings(restoreFiles, savedHostname, restoreHostname)
+					: [];
+			const restoreText = new Map(
+				restoreFiles.map((file) => [
+					file.path,
+					decodeBackupTextForFileManager(file.bytes, file.path)
+				])
+			);
+			if (
+				!window.confirm(
+					`Restore ${restoreFiles.length} files${restoreHostname ? ` as ${restoreHostname}` : ''}? Wi-Fi/AP credentials are included and the device will reboot.${cloneWarnings.length ? `\n\nWarning:\n- ${cloneWarnings.join('\n- ')}` : ''}`
+				)
+			)
 				return;
+
+			const currentFiles = await probeFiles(
+				getBackupProbePaths(restoreFiles.map((file) => file.path))
+			);
+			const currentPaths = new Set(currentFiles.map((file) => file.path));
+			const currentSizes = new Map(currentFiles.map((file) => [file.path, file.bytes.length]));
+			const backupPaths = new Set(restoreFiles.map((file) => file.path));
+			const expectedHashes = new Map(
+				await Promise.all(
+					restoreFiles.map(async (file) => [file.path, await sha256Hex(file.bytes)] as const)
+				)
+			);
+			const requiredGrowth = restoreFiles.reduce(
+				(total, file) =>
+					total + Math.max(0, file.bytes.length - (currentSizes.get(file.path) ?? 0)),
+				0
+			);
+			const usage = await getFilesystemUsage();
+			if (requiredGrowth + 4096 > usage.total - usage.used) {
+				throw new Error('Not enough free filesystem space to restore this backup safely');
 			}
-		}
-		// console.log("folderListFromBreadCrumbs", filesState, breadCrumbs, folderList)
-	}
-
-	function handleEdit(index: number) {
-		editableFile = folderList[index];
-		path = editableFile.path;
-
-		if (breadCrumbs.length > 0 && editableFile.name === breadCrumbs[breadCrumbs.length - 1]) {
-			//if parent folder
-			breadCrumbs.pop(); //remove last folder
-			folderListFromBreadCrumbs();
-			localStorage.setItem('breadCrumbs', JSON.stringify(breadCrumbs));
-			console.log('handleEdit parent', folderList, breadCrumbs);
-		} else if (editableFile.isFile) {
-			//if file
-			console.log('handleEdit file', editableFile, path);
-			openFileEditor(false, true, path);
-		} else {
-			//if folder, go to folder
-			breadCrumbs.push(editableFile.name);
-			localStorage.setItem('breadCrumbs', JSON.stringify(breadCrumbs));
-			folderListFromBreadCrumbs();
-			console.log('handleEdit go to folder', folderList, breadCrumbs);
-		}
-	}
-
-	function confirmDelete(index: number) {
-		modals.open(ConfirmDialog, {
-			title: 'Delete item',
-			message: 'Are you sure you want to delete ' + folderList[index].name + '?',
-			labels: {
-				cancel: { label: 'Cancel', icon: Cancel },
-				confirm: { label: 'Delete', icon: Delete }
-			},
-			onConfirm: () => {
-				// Check if item is currently been edited and delete as well
-				// if (folderList[index].name === editableFile.name) {
-				// 	addFile();
-				// }
-
-				//update filesState
-				const response: { deletes: FilesState[]; showHidden?: boolean } = { deletes: [] };
-				response.deletes.push(folderList[index]);
-				console.log('confirmDelete', response);
-				//send the new itemstate to server
-				response.showHidden = filesState.showHidden; //otherwise set to false
-				postFilesState(response);
-
-				modals.close();
+			for (const directory of collectBackupDirectories(restoreFiles.map((file) => file.path))) {
+				await postFileManager({
+					news: [{ path: directory, name: fileName(directory), isFile: false, contents: '' }]
+				});
 			}
-		});
-	}
-
-	const handleFilesState = (data: FilesState) => {
-		console.log('socket update received');
-		filesState = data;
-		folderListFromBreadCrumbs();
-	};
-
-	onMount(() => {
-		let bc = localStorage.getItem('breadCrumbs');
-		if (bc) {
-			try {
-				breadCrumbs = JSON.parse(bc);
-			} catch {
-				breadCrumbs = [];
-				localStorage.removeItem('breadCrumbs');
+			for (const file of restoreFiles) {
+				const item = {
+					path: file.path,
+					name: fileName(file.path),
+					isFile: true,
+					contents: restoreText.get(file.path)!
+				};
+				await postFileManager(currentPaths.has(file.path) ? { updates: [item] } : { news: [item] });
 			}
+
+			for (const file of restoreFiles) {
+				const expected = expectedHashes.get(file.path);
+				if (
+					!expected ||
+					(await sha256Hex(await readFileBytes(file.path))).toLowerCase() !== expected.toLowerCase()
+				) {
+					throw new Error(
+						`Restore verification failed for ${file.path}; the device was not rebooted`
+					);
+				}
+			}
+
+			for (const currentPath of [...currentPaths]
+				.filter((candidate) => !backupPaths.has(candidate))
+				.sort((a, b) => b.length - a.length)) {
+				await postFileManager({ deletes: [{ path: currentPath, isFile: true }] });
+			}
+
+			for (const stalePath of [...currentPaths].filter((path) => !backupPaths.has(path))) {
+				if (await probeFile(stalePath)) {
+					throw new Error(
+						`Restore verification found stale file ${stalePath}; the device was not rebooted`
+					);
+				}
+			}
+
+			const restart = await fetch('/rest/restart', { method: 'POST', headers: authHeaders() });
+			if (!restart.ok)
+				throw new Error(`Restore completed but reboot failed (HTTP ${restart.status})`);
+			notifications.success(
+				'Configuration restored. Reconnect after reboot, verify it, then press ⭐ to update the golden copy.',
+				8000
+			);
+			window.setTimeout(() => window.location.reload(), 1500);
+		} catch (error) {
+			console.error('Configuration import failed:', error);
+			notifications.error(
+				`Configuration import failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+				8000
+			);
+		} finally {
+			backupBusy = false;
 		}
-
-		socket.on('FileManager', handleFilesState);
-		// getState(); //done in settingscard
-	});
-
-	onDestroy(() => socket.off('FileManager', handleFilesState));
+	}
 </script>
 
 <SettingsCard collapsible={false}>
@@ -238,125 +278,35 @@
 	{#if !page.data.features.security || $user.admin}
 		<div class="bg-base-200 relative grid w-full max-w-2xl self-center overflow-hidden shadow-lg">
 			<div class="flex h-16 w-full items-center justify-between space-x-3 p-0 text-xl font-medium">
-				Files /{breadCrumbs.join('/')}
+				Configuration backup
 			</div>
-			{#await getState()}
-				<Spinner />
-			{:then}
-				<div class="relative w-full overflow-visible">
-					<button
-						class="btn btn-primary text-primary-content btn-md absolute -top-14 right-16"
-						onclick={() => {
-							addFile();
-						}}
-					>
-						<Add class="h-6 w-6" /></button
-					>
-					<button
-						class="btn btn-primary text-primary-content btn-md absolute -top-14 right-1"
-						onclick={() => {
-							addFolder();
-						}}
-					>
-						<Add class="h-6 w-6" /></button
-					>
-				</div>
-
-				<div class="space-y-1 overflow-x-auto">
-					{#each folderList as item, index (item.path || item.name)}
-						<div class="rounded-box bg-base-100 flex items-center space-x-3 px-4 py-2">
-							<div class="mask mask-hexagon bg-primary h-auto w-10 shrink-0">
-								{#if item.isFile}
-									<FileIcon class="text-primary-content h-auto w-full scale-75" />
-								{:else}
-									<FolderIcon class="text-primary-content h-auto w-full scale-75" />
-								{/if}
-							</div>
-							<div>
-								{#if breadCrumbs.length > 0 && item.name === breadCrumbs[breadCrumbs.length - 1]}
-									<div>..</div>
-								{:else}
-									<div class="font-bold">{item.name}</div>
-									{#if item.isFile}
-										<div>
-											{item.size / 1000} KB {new Intl.DateTimeFormat('en-GB', {
-												dateStyle: 'short',
-												timeStyle: 'short',
-												timeZone: 'UTC'
-											}).format(item.time * 1000)}
-										</div>
-									{:else}
-										<div>{item.files.length} files/folders</div>
-									{/if}
-								{/if}
-							</div>
-
-							{#if !page.data.features.security || $user.admin}
-								<div class="grow"></div>
-								<div class="mx-0 space-x-0 px-0">
-									<button
-										class="btn btn-ghost btn-sm"
-										onclick={() => {
-											handleEdit(index);
-										}}
-									>
-										<Edit class="h-6 w-6" /></button
-									>
-									{#if !(breadCrumbs.length > 0 && item.name === breadCrumbs[breadCrumbs.length - 1])}
-										<button
-											class="btn btn-ghost btn-sm"
-											onclick={() => {
-												confirmDelete(index);
-											}}
-											disabled={item.files && item.files.length > 0}
-										>
-											<Delete class="text-error h-6 w-6" />
-										</button>
-									{:else}
-										&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-									{/if}
-								</div>
-							{/if}
-						</div>
-					{/each}
-				</div>
-				<br />
-				<div class="rounded-box bg-base-100 flex items-center space-x-3 px-4 py-2">
-					<div class="mask mask-hexagon bg-primary h-auto w-10 flex-none">
-						<FolderIcon class="text-primary-content h-auto w-full scale-75" />
-					</div>
-					<div>
-						<div class="font-bold">File System Size</div>
-						<div class="flex flex-wrap justify-start gap-1 text-sm opacity-75">
-							<span
-								>{((filesState.fs_used / filesState.fs_total) * 100).toFixed(1)} % of {Math.round(
-									filesState.fs_total / 1000
-								).toLocaleString('en-US')} KB</span
-							>
-
-							<span
-								>({Math.round((filesState.fs_total - filesState.fs_used) / 1000).toLocaleString(
-									'en-US'
-								)}
-								KB free)</span
-							>
-						</div>
-					</div>
-				</div>
-				<FieldRenderer
-					property={{ name: 'showHidden', type: 'checkbox' }}
-					bind:value={filesState.showHidden}
-					onChange={() => {
-						postFilesState({ showHidden: filesState.showHidden });
-					}}
-				></FieldRenderer>
-			{/await}
+			<div class="flex flex-wrap gap-2 pb-4">
+				<button
+					class="btn btn-secondary text-secondary-content btn-md"
+					title="Export configuration backup"
+					aria-label="Export configuration backup"
+					onclick={exportConfigBackup}
+					disabled={backupBusy}
+				>
+					<Download class="h-6 w-6" />
+				</button>
+				<button
+					class="btn btn-secondary text-secondary-content btn-md"
+					title="Import configuration backup"
+					aria-label="Import configuration backup"
+					onclick={() => backupFileInput?.click()}
+					disabled={backupBusy}
+				>
+					<Upload class="h-6 w-6" />
+				</button>
+				<input
+					class="hidden"
+					bind:this={backupFileInput}
+					type="file"
+					accept=".zip,application/zip"
+					onchange={importConfigBackup}
+				/>
+			</div>
 		</div>
 	{/if}
-	<!-- 🌙 link to api -->
-	<div class="flex justify-end px-4 pb-3">
-		<a href="/rest/FileManager" target="_blank" rel="noopener noreferrer" title="API"
-			><Api class="mr-2 h-6 w-6 shrink-0 self-end" /></a
-		>
-	</div>
 </SettingsCard>

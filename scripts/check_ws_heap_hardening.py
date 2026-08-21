@@ -61,6 +61,19 @@ require('httpd_resp_set_hdr(request->request(), "Connection", "close");' not in 
 require('httpd_resp_set_hdr(request->request(), "Connection", "close");' not in embedded_static_source, "Embedded static responses must reuse connections instead of churning TCP state")
 require('response.addHeader("Connection", "close");' not in embedded_static_source, "Static assets must not allocate a close header")
 require("response.sendChunk" not in embedded_static_source, "Embedded assets must not serialize a chunk loop on httpd")
+chunk_send = "esp_err_t err = httpd_resp_send_chunk(this->_request->request(), (char *)chunk, chunksize);"
+chunk_send_start = response_source.index(chunk_send)
+chunk_success = response_source.index("if (err == ESP_OK)", chunk_send_start)
+chunk_yield = response_source.index("vTaskDelay(1);", chunk_success)
+chunk_failure = response_source.index("if (err != ESP_OK)", chunk_send_start)
+require(chunk_send_start < chunk_success < chunk_yield < chunk_failure,
+        "Successful HTTP chunks must yield before the next chunk")
+require("/rest/FileManagerBackup" not in file_manager_source,
+        "FileManager backup must use per-file reads instead of a filesystem inventory route")
+file_manager_close = file_manager_source.index("file.close();")
+file_manager_yield = file_manager_source.index("vTaskDelay(1);", file_manager_close)
+require(file_manager_close < file_manager_yield,
+        "FileManager directory scans must yield after each entry")
 require("config.send_wait_timeout" not in server_source, "HTTP sends must retain the ESP-IDF timeout default")
 require("PsychicFileResponse response(request, _file, _filename);" in static_file_source, "Static files must reuse the handle opened during route matching")
 file_response_branch = static_file_source.split("PsychicFileResponse response(request, _file, _filename);", 1)[1].split("return response.send();", 1)[0]
